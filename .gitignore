@@ -53,3 +53,22 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# --- project-specific ---
+
+# Secrets (Wi-Fi credentials, hostnames)
+firmware/src/secrets.h
+mac/secrets.env
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Brainstorming session scratch space
+.superpowers/
