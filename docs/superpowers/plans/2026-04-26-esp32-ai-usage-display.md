@@ -15,6 +15,34 @@
 
 ---
 
+## Revision notes (2026-04-26, post-T1/T2)
+
+After the Phase A research, the spec and plan were revised. Tasks below
+already reflect the revisions; this section is a guide for engineers reading
+older history.
+
+1. **No quota percentages.** Anthropic does not publish the Max-5x token caps;
+   computing `tokens / fabricated_cap × 100%` would lie. The display now shows
+   absolute `used_tokens` as the dominant figure on each row, and the bar's
+   fill represents **time progress through the window**, not quota. See spec
+   §1, §6, §7.
+2. **Wire schema renamed and reshaped.** `window_5h` → `block_5h`. Fields
+   `percent` and `limit_tokens` are gone. New fields: `started_at`, `cost_usd`,
+   `messages` (both rows), and `burn_rate_tpm` (5h block only). Today payload
+   adds `messages` and `cost_usd`. See spec §6.
+3. **Weekly clock approximation.** Claude Code does not persist the weekly
+   period start anywhere on disk and `/status` is not invokable from the CLI.
+   `push-usage.sh` therefore scans `~/.claude/projects/**/*.jsonl` for the
+   earliest `type:"user"` event with `timestamp >= now − 168 h`. Single-machine
+   accounts match `/status` exactly; multi-machine accounts may drift up to 7 d.
+4. **LCD strategy change.** No upstream LovyanGFX driver exists for the panel
+   (Sitronix ST7305, mono, non-linear 4×2 tile framebuffer). Instead of
+   subclassing `LGFX_Device`, Task 13 vendors Waveshare's `display_bsp.{h,cpp}`
+   for chip init and uses `LGFX_Sprite` + `DisplayPort` to compose 1-bit
+   frames. See `docs/superpowers/notes/2026-04-26-lcd-driver.md`.
+
+---
+
 ## Phase A — De-risk before writing code
 
 These two tasks resolve the open questions in spec §11. They produce notes in `docs/superpowers/notes/`, not production code.
@@ -155,128 +183,243 @@ git commit -m "mac: bats smoke test confirms test runner works"
 
 **Files:**
 - Create: `mac/push-usage.sh`
-- Create: `mac/fixtures/sample-blocks.json`
+- Create: `mac/fixtures/sample/blocks-active.json`        (mock ccusage)
+- Create: `mac/fixtures/sample/daily.json`                (mock ccusage)
+- Create: `mac/fixtures/sample/projects/demo/abc123.jsonl` (mock Claude logs)
 - Create: `mac/test/aggregate.bats`
 
-The aggregation core is the riskiest pure-logic piece. We test it with hand-crafted fixtures that simulate `ccusage`'s output (per Task 1's findings).
+The aggregation orchestrates three data sources: (1) `ccusage blocks --active --json` for the 5h block, (2) `ccusage daily --json` for today and weekly token sums, (3) a recursive scan of `~/.claude/projects/**/*.jsonl` for the weekly window's `started_at`. The script is testable by feeding it fixture directories instead of running ccusage / scanning `~/.claude/`.
 
-- [ ] **Step 1: Write a fixture representing 5h-window data**
+- [ ] **Step 1: Write fixtures**
 
-Create `mac/fixtures/sample-blocks.json` based on the actual structure recorded in Task 1's notes. Example shape (adjust to match real ccusage output):
+`mac/fixtures/sample/blocks-active.json` (mocks `ccusage blocks --active --json`):
 
 ```json
 {
-  "now_epoch": 1745673120,
   "blocks": [
-    {"start_epoch": 1745655120, "end_epoch": 1745673120, "tokens": 342000}
-  ],
-  "weekly": {
-    "start_epoch": 1745222400, "end_epoch": 1745827200, "tokens": 1800000
-  },
-  "today": {"tokens": 5200000, "sessions": 14}
+    {
+      "id":         "2026-04-26T15:00:00.000Z",
+      "startTime":  "2026-04-26T15:00:00.000Z",
+      "endTime":    "2026-04-26T20:00:00.000Z",
+      "isActive":   true,
+      "isGap":      false,
+      "entries":    11,
+      "totalTokens":1017862,
+      "costUSD":    1.81,
+      "burnRate":   { "tokensPerMinute": 82684.1, "costPerHour": 8.81 }
+    }
+  ]
 }
 ```
 
-- [ ] **Step 2: Write the failing test for the aggregation function**
+`mac/fixtures/sample/daily.json` (mocks `ccusage daily --json`; covers the weekly window 2026-04-19 → 2026-04-26):
 
-Create `mac/test/aggregate.bats`:
+```json
+{
+  "daily": [
+    {"date":"2026-04-19","totalTokens":     0,"totalCost":0.00},
+    {"date":"2026-04-20","totalTokens":     0,"totalCost":0.00},
+    {"date":"2026-04-21","totalTokens":     0,"totalCost":0.00},
+    {"date":"2026-04-22","totalTokens":     0,"totalCost":0.00},
+    {"date":"2026-04-23","totalTokens":     0,"totalCost":0.00},
+    {"date":"2026-04-24","totalTokens":     0,"totalCost":0.00},
+    {"date":"2026-04-25","totalTokens":2300000,"totalCost":9.78},
+    {"date":"2026-04-26","totalTokens":3100000,"totalCost":13.91}
+  ],
+  "totals": { "totalTokens": 5400000, "totalCost": 23.69 }
+}
+```
+
+`mac/fixtures/sample/projects/demo/abc123.jsonl` (mocks ~/.claude/projects/...; the earliest `type:"user"` timestamp here is what `weekly.started_at` should derive to):
+
+```jsonl
+{"timestamp":"2026-04-25T10:38:33.947Z","type":"user","sessionId":"abc123","message":{"content":"hello"}}
+{"timestamp":"2026-04-25T10:38:34.012Z","type":"assistant","sessionId":"abc123"}
+{"timestamp":"2026-04-26T09:00:00.000Z","type":"user","sessionId":"abc123","message":{"content":"again"}}
+{"timestamp":"2026-04-26T09:00:01.000Z","type":"assistant","sessionId":"abc123"}
+```
+
+The fixture pinpoints `weekly.started_at = 2026-04-25T10:38:33Z = 1777718313` and therefore `weekly.resets_at = 1778323113` (= +7 days).
+
+- [ ] **Step 2: Write the failing bats tests**
+
+`mac/test/aggregate.bats`:
 
 ```bash
 #!/usr/bin/env bats
 
 setup() {
-  PROJECT_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
-  PUSH="$PROJECT_ROOT/push-usage.sh"
-  FIXTURE="$PROJECT_ROOT/fixtures/sample-blocks.json"
+  ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  PUSH="$ROOT/push-usage.sh"
+  FIX="$ROOT/fixtures/sample"
+  # Pin "now" so tests are deterministic. "Now" = 2026-04-26T15:30:00Z = 1777735800
+  NOW=1777735800
 }
 
-@test "aggregates fixture into wire-schema JSON" {
-  run "$PUSH" --input "$FIXTURE" --emit-only
+run_push() {
+  "$PUSH" --emit-only \
+          --now "$NOW" \
+          --ccusage-fixture-dir "$FIX" \
+          --claude-dir "$FIX/projects"
+}
+
+@test "block_5h is sourced from ccusage blocks --active" {
+  run run_push
   [ "$status" -eq 0 ]
-  ts=$(echo "$output" | jq -r '.ts')
-  pct=$(echo "$output" | jq -r '.window_5h.percent')
-  [ "$ts" = "1745673120" ]
-  [ "$pct" = "47" ]
+  [ "$(jq -r '.block_5h.used_tokens' <<<"$output")" = "1017862" ]
+  [ "$(jq -r '.block_5h.cost_usd'    <<<"$output")" = "1.81" ]
+  [ "$(jq -r '.block_5h.messages'    <<<"$output")" = "11" ]
+  [ "$(jq -r '.block_5h.burn_rate_tpm' <<<"$output")" = "82684" ]
+  [ "$(jq -r '.block_5h.started_at'  <<<"$output")" = "1777734000" ]   # 2026-04-26T15:00Z
+  [ "$(jq -r '.block_5h.resets_at'   <<<"$output")" = "1777752000" ]   # +5h
 }
 
-@test "weekly percent computed against plan limit" {
-  run "$PUSH" --input "$FIXTURE" --emit-only
-  pct=$(echo "$output" | jq -r '.weekly.percent')
-  [ "$pct" = "18" ]
+@test "weekly.started_at derives from earliest user event in trailing 168h" {
+  run run_push
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.weekly.started_at' <<<"$output")" = "1777718313" ]
+  [ "$(jq -r '.weekly.resets_at'  <<<"$output")" = "1778323113" ]      # +7d
 }
 
-@test "today fields passed through" {
-  run "$PUSH" --input "$FIXTURE" --emit-only
-  toks=$(echo "$output" | jq -r '.today.tokens')
-  sess=$(echo "$output" | jq -r '.today.sessions')
-  [ "$toks" = "5200000" ]
-  [ "$sess" = "14" ]
+@test "weekly.used_tokens sums daily entries within the window" {
+  run run_push
+  # Days 04-25 + 04-26 fall inside the weekly window (started 04-25T10:38)
+  [ "$(jq -r '.weekly.used_tokens' <<<"$output")" = "5400000" ]
+  [ "$(jq -r '.weekly.cost_usd'    <<<"$output")" = "23.69" ]
+}
+
+@test "today fields populate from current local date in daily.json" {
+  run run_push
+  [ "$(jq -r '.today.tokens'   <<<"$output")" = "3100000" ]
+  [ "$(jq -r '.today.cost_usd' <<<"$output")" = "13.91" ]
+}
+
+@test "no quota fields leak into output (no percent, no limit_tokens)" {
+  run run_push
+  [ "$(jq -e '.block_5h | has("percent")' <<<"$output")" = "false" ]
+  [ "$(jq -e '.block_5h | has("limit_tokens")' <<<"$output")" = "false" ]
+  [ "$(jq -e '.weekly   | has("percent")' <<<"$output")" = "false" ]
+  [ "$(jq -e '.weekly   | has("limit_tokens")' <<<"$output")" = "false" ]
+}
+
+@test "plan and ts present at root" {
+  run run_push
+  [ "$(jq -r '.plan' <<<"$output")" = "Max 5x" ]
+  [ "$(jq -r '.ts'   <<<"$output")" = "1777735800" ]
 }
 ```
 
-- [ ] **Step 3: Run tests and confirm they fail**
+- [ ] **Step 3: Run tests; expect them to fail**
 
 Run: `bats mac/test/aggregate.bats`
-Expected: 3 failures, message about `push-usage.sh: not found` or similar.
+Expected: 6 failures, all citing missing `push-usage.sh` or empty output.
 
-- [ ] **Step 4: Write the minimal `push-usage.sh`**
+- [ ] **Step 4: Implement `push-usage.sh`**
 
-Create `mac/push-usage.sh` (use the actual ccusage shape from Task 1; this is the template):
+The script supports both real-mode (no flags) and test-mode (`--ccusage-fixture-dir`, `--claude-dir`, `--now`). Flags exist solely so bats can pin the data sources and clock. Required external tools: `jq`, `python3` (for ISO-8601 → epoch on macOS, since BSD `date` is awkward), `find`, `npx` (real mode only).
+
+Skeleton:
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Plan limits — confirmed in Task 1 (docs/superpowers/notes/2026-04-26-ccusage-investigation.md)
-LIMIT_5H=720000
-LIMIT_WEEKLY=10000000
-PLAN_NAME="Max 5x"
-
-INPUT=""
+NOW="$(date +%s)"
+PLAN_NAME="${PLAN_NAME:-Max 5x}"
+CCUSAGE_FIXTURE_DIR=""
+CLAUDE_DIR="${HOME}/.claude/projects"
 EMIT_ONLY=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --input)     INPUT="$2"; shift 2 ;;
-    --emit-only) EMIT_ONLY=1; shift ;;
+    --emit-only)               EMIT_ONLY=1; shift ;;
+    --now)                     NOW="$2";  shift 2 ;;
+    --ccusage-fixture-dir)     CCUSAGE_FIXTURE_DIR="$2"; shift 2 ;;
+    --claude-dir)              CLAUDE_DIR="$2"; shift 2 ;;
     *) echo "unknown flag: $1" >&2; exit 64 ;;
   esac
 done
 
-read_fixture() {
-  cat "$INPUT"
+iso_to_epoch() { python3 -c 'import sys,datetime;print(int(datetime.datetime.fromisoformat(sys.argv[1].replace("Z","+00:00")).timestamp()))' "$1"; }
+
+ccusage_blocks_json() {
+  if [ -n "$CCUSAGE_FIXTURE_DIR" ]; then cat "$CCUSAGE_FIXTURE_DIR/blocks-active.json"
+  else                                   npx ccusage@latest blocks --active --json 2>/dev/null
+  fi
 }
 
-aggregate() {
-  jq -c --argjson l5h "$LIMIT_5H" --argjson lw "$LIMIT_WEEKLY" --arg plan "$PLAN_NAME" '
-    {
-      ts: .now_epoch,
-      plan: $plan,
-      window_5h: {
-        percent: ((.blocks | map(.tokens) | add // 0) * 100 / $l5h | floor),
-        used_tokens: (.blocks | map(.tokens) | add // 0),
-        limit_tokens: $l5h,
-        resets_at: (.blocks | map(.end_epoch) | max // .now_epoch)
-      },
-      weekly: {
-        percent: (.weekly.tokens * 100 / $lw | floor),
-        used_tokens: .weekly.tokens,
-        limit_tokens: $lw,
-        resets_at: .weekly.end_epoch
-      },
-      today: {
-        tokens: .today.tokens,
-        sessions: .today.sessions
+ccusage_daily_json() {
+  if [ -n "$CCUSAGE_FIXTURE_DIR" ]; then cat "$CCUSAGE_FIXTURE_DIR/daily.json"
+  else                                   npx ccusage@latest daily --json 2>/dev/null
+  fi
+}
+
+# Earliest type:"user" timestamp in trailing 168h, scanning .jsonl recursively.
+weekly_started_at() {
+  local since=$(( NOW - 7*86400 ))
+  local min=""
+  while IFS= read -r ts; do
+    local ep; ep=$(iso_to_epoch "$ts" 2>/dev/null || echo "")
+    [ -z "$ep" ] && continue
+    [ "$ep" -lt "$since" ] && continue
+    [ -z "$min" ] && { min=$ep; continue; }
+    [ "$ep" -lt "$min" ] && min=$ep
+  done < <(find "$CLAUDE_DIR" -type f -name '*.jsonl' 2>/dev/null \
+            | xargs -I {} jq -r 'select(.type=="user") | .timestamp' {} 2>/dev/null)
+  echo "${min:-$since}"
+}
+
+build_payload() {
+  local now="$1"
+  local blocks daily wstart
+  blocks="$(ccusage_blocks_json)"
+  daily="$(ccusage_daily_json)"
+  wstart="$(weekly_started_at)"
+
+  jq -nc \
+    --argjson now    "$now" \
+    --argjson wstart "$wstart" \
+    --arg     plan   "$PLAN_NAME" \
+    --argjson blocks "$blocks" \
+    --argjson daily  "$daily" \
+    --arg     today_date "$(date -r "$now" +%Y-%m-%d)" \
+    '
+      ($blocks.blocks[0]) as $b |
+      ($daily.daily // []) as $d |
+      ($d | map(select(.date >= ($wstart | strftime("%Y-%m-%d"))))) as $win |
+      ($d | map(select(.date == $today_date)) | first) as $today |
+      {
+        ts:   $now,
+        plan: $plan,
+        block_5h: ($b // {}) | {
+          used_tokens:    (.totalTokens // 0),
+          started_at:     (.startTime // null) | (if . then (
+            (sub("Z$"; "+00:00")) | fromdateiso8601
+          ) else 0 end),
+          resets_at:      (.endTime  // null) | (if . then (
+            (sub("Z$"; "+00:00")) | fromdateiso8601
+          ) else 0 end),
+          cost_usd:       (.costUSD // 0),
+          messages:       (.entries // 0),
+          burn_rate_tpm:  ((.burnRate.tokensPerMinute // 0) | floor)
+        },
+        weekly: {
+          used_tokens: ($win | map(.totalTokens) | add // 0),
+          started_at:  $wstart,
+          resets_at:   ($wstart + 7*86400),
+          cost_usd:    ($win | map(.totalCost)   | add // 0),
+          messages:    ($win | length)
+        },
+        today: {
+          tokens:   ($today.totalTokens // 0),
+          messages: 0,
+          cost_usd: ($today.totalCost  // 0)
+        }
       }
-    }
-  '
+    '
 }
 
-if [ -n "$INPUT" ]; then
-  payload="$(read_fixture | aggregate)"
-else
-  payload="$(npx ccusage@latest --json | aggregate)"
-fi
+payload="$(build_payload "$NOW")"
 
 if [ "$EMIT_ONLY" -eq 1 ]; then
   echo "$payload"
@@ -290,6 +433,10 @@ echo "$payload" | curl -fsS --max-time 10 \
   --data @- "http://${HOST}/data"
 ```
 
+> **Note on `today.messages`:** ccusage `daily` doesn't expose per-day message
+> counts. v1 emits `0`; v2 may compute by counting `type:"user"` events in the
+> jsonl scan. The device renders `—` when missing (or simply omits).
+
 - [ ] **Step 5: Make script executable**
 
 Run: `chmod +x mac/push-usage.sh`
@@ -297,13 +444,14 @@ Run: `chmod +x mac/push-usage.sh`
 - [ ] **Step 6: Run tests; expect them to pass**
 
 Run: `bats mac/test/aggregate.bats`
-Expected: `3 tests, 0 failures`.
+Expected: `6 tests, 0 failures`.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add mac/push-usage.sh mac/fixtures/sample-blocks.json mac/test/aggregate.bats
-git commit -m "mac: push-usage.sh aggregation with bats fixtures"
+git add mac/push-usage.sh mac/fixtures/sample/ mac/test/aggregate.bats
+git commit -m "mac: push-usage.sh aggregation (5h block + weekly + today, no quota)"
+git push origin main
 ```
 
 ### Task 6: `push-usage.sh` — real ccusage execution path
@@ -328,7 +476,11 @@ setup() {
   if [ ! -d "$HOME/.claude/projects" ]; then skip "no Claude logs"; fi
   run "$PUSH" --emit-only
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e 'has("ts") and has("window_5h") and has("weekly")'
+  echo "$output" | jq -e '
+    has("ts") and has("plan")
+      and (.block_5h | has("used_tokens") and has("started_at") and has("resets_at"))
+      and (.weekly   | has("used_tokens") and has("started_at") and has("resets_at"))
+  '
 }
 ```
 
@@ -412,22 +564,30 @@ git commit -m "mac: launchd plist for 60s push interval"
 mkdir -p mac/fixtures/edge-cases
 ```
 
-Create `mac/fixtures/edge-cases/zero.json`:
+Each fixture is a **wire-schema** payload (what `push-usage.sh` would have emitted) — the helper POSTs them straight to the device for visual verification.
+
+`mac/fixtures/edge-cases/idle.json` — empty 5h block (idle ≥ 5 h):
 
 ```json
-{"ts":1745673120,"plan":"Max 5x","window_5h":{"percent":0,"used_tokens":0,"limit_tokens":720000,"resets_at":1745682000},"weekly":{"percent":0,"used_tokens":0,"limit_tokens":10000000,"resets_at":1746057600},"today":{"tokens":0,"sessions":0}}
+{"ts":1777735800,"plan":"Max 5x","block_5h":{"used_tokens":0,"started_at":1777734000,"resets_at":1777752000,"cost_usd":0,"messages":0,"burn_rate_tpm":0},"weekly":{"used_tokens":0,"started_at":1777131000,"resets_at":1777735800,"cost_usd":0,"messages":0},"today":{"tokens":0,"messages":0,"cost_usd":0}}
 ```
 
-Create `mac/fixtures/edge-cases/full.json`:
+`mac/fixtures/edge-cases/full.json` — large numbers exercise the K/M formatter:
 
 ```json
-{"ts":1745673120,"plan":"Max 5x","window_5h":{"percent":100,"used_tokens":720000,"limit_tokens":720000,"resets_at":1745682000},"weekly":{"percent":100,"used_tokens":10000000,"limit_tokens":10000000,"resets_at":1746057600},"today":{"tokens":42000000,"sessions":99}}
+{"ts":1777735800,"plan":"Max 5x","block_5h":{"used_tokens":24500000,"started_at":1777734000,"resets_at":1777752000,"cost_usd":89.42,"messages":214,"burn_rate_tpm":480000},"weekly":{"used_tokens":312000000,"started_at":1777200000,"resets_at":1777804800,"cost_usd":1187.10,"messages":1430},"today":{"tokens":52000000,"messages":311,"cost_usd":201.50}}
 ```
 
-Create `mac/fixtures/edge-cases/missing-today.json`:
+`mac/fixtures/edge-cases/missing-today.json` — the optional `today` block absent:
 
 ```json
-{"ts":1745673120,"plan":"Max 5x","window_5h":{"percent":47,"used_tokens":342000,"limit_tokens":720000,"resets_at":1745682000},"weekly":{"percent":18,"used_tokens":1800000,"limit_tokens":10000000,"resets_at":1746057600}}
+{"ts":1777735800,"plan":"Max 5x","block_5h":{"used_tokens":1017862,"started_at":1777734000,"resets_at":1777752000,"cost_usd":1.81,"messages":11,"burn_rate_tpm":82684},"weekly":{"used_tokens":5400000,"started_at":1777718313,"resets_at":1778323113,"cost_usd":23.69,"messages":2}}
+```
+
+`mac/fixtures/edge-cases/no-burn.json` — burn rate omitted (e.g. immediately after a fresh block boundary):
+
+```json
+{"ts":1777735800,"plan":"Max 5x","block_5h":{"used_tokens":42000,"started_at":1777735200,"resets_at":1777753200,"cost_usd":0.08,"messages":1},"weekly":{"used_tokens":42000,"started_at":1777735200,"resets_at":1778340000,"cost_usd":0.08,"messages":1},"today":{"tokens":42000,"messages":1,"cost_usd":0.08}}
 ```
 
 - [ ] **Step 2: Write the helper**
@@ -648,17 +808,33 @@ git commit -m "firmware: mDNS broadcast as ai-usage-display.local"
 struct UsageData {
   uint32_t ts = 0;
   char     plan[16] = {0};
-  uint8_t  pct_5h = 0;
-  uint64_t tok_5h_used = 0;
-  uint64_t tok_5h_limit = 0;
-  uint32_t reset_5h = 0;
-  uint8_t  pct_weekly = 0;
-  uint64_t tok_weekly_used = 0;
-  uint64_t tok_weekly_limit = 0;
-  uint32_t reset_weekly = 0;
-  uint64_t today_tokens = 0;
-  uint32_t today_sessions = 0;
-  bool     today_present = false;
+
+  // 5h block (required fields → started_at, resets_at, used_tokens)
+  uint64_t tok_5h        = 0;
+  uint32_t started_5h    = 0;
+  uint32_t reset_5h      = 0;
+  double   cost_5h_usd   = 0.0;
+  uint32_t msgs_5h       = 0;
+  uint32_t burn_tpm      = 0;
+  bool     burn_present  = false;
+  bool     cost_5h_present = false;
+  bool     msgs_5h_present = false;
+
+  // weekly (required fields → started_at, resets_at, used_tokens)
+  uint64_t tok_weekly       = 0;
+  uint32_t started_weekly   = 0;
+  uint32_t reset_weekly     = 0;
+  double   cost_weekly_usd  = 0.0;
+  uint32_t msgs_weekly      = 0;
+  bool     cost_weekly_present = false;
+  bool     msgs_weekly_present = false;
+
+  // today (whole object optional)
+  uint64_t tok_today       = 0;
+  uint32_t msgs_today      = 0;
+  double   cost_today_usd  = 0.0;
+  bool     today_present   = false;
+
   bool     valid = false;
 };
 ```
@@ -686,27 +862,45 @@ bool parseUsageJson(const char* body, UsageData& out) {
   JsonDocument doc;
   if (deserializeJson(doc, body)) return false;
   if (!doc["ts"].is<uint32_t>()) return false;
-  if (!doc["window_5h"]["percent"].is<int>()) return false;
-  if (!doc["weekly"]["percent"].is<int>()) return false;
+
+  // Required block_5h fields
+  if (!doc["block_5h"]["used_tokens"].is<uint64_t>()) return false;
+  if (!doc["block_5h"]["started_at"].is<uint32_t>())  return false;
+  if (!doc["block_5h"]["resets_at"].is<uint32_t>())   return false;
+  // Required weekly fields
+  if (!doc["weekly"]["used_tokens"].is<uint64_t>()) return false;
+  if (!doc["weekly"]["started_at"].is<uint32_t>())  return false;
+  if (!doc["weekly"]["resets_at"].is<uint32_t>())   return false;
 
   out.ts = doc["ts"];
   strlcpy(out.plan, doc["plan"] | "", sizeof(out.plan));
-  out.pct_5h           = doc["window_5h"]["percent"];
-  out.tok_5h_used      = doc["window_5h"]["used_tokens"]  | 0;
-  out.tok_5h_limit     = doc["window_5h"]["limit_tokens"] | 0;
-  out.reset_5h         = doc["window_5h"]["resets_at"]    | 0;
-  out.pct_weekly       = doc["weekly"]["percent"];
-  out.tok_weekly_used  = doc["weekly"]["used_tokens"]  | 0;
-  out.tok_weekly_limit = doc["weekly"]["limit_tokens"] | 0;
-  out.reset_weekly     = doc["weekly"]["resets_at"]    | 0;
 
+  // 5h block
+  auto b = doc["block_5h"];
+  out.tok_5h     = b["used_tokens"];
+  out.started_5h = b["started_at"];
+  out.reset_5h   = b["resets_at"];
+  if (b["cost_usd"].is<double>())      { out.cost_5h_usd   = b["cost_usd"];      out.cost_5h_present = true; }
+  if (b["messages"].is<uint32_t>())    { out.msgs_5h       = b["messages"];      out.msgs_5h_present = true; }
+  if (b["burn_rate_tpm"].is<uint32_t>()){ out.burn_tpm      = b["burn_rate_tpm"]; out.burn_present    = true; }
+
+  // weekly
+  auto w = doc["weekly"];
+  out.tok_weekly     = w["used_tokens"];
+  out.started_weekly = w["started_at"];
+  out.reset_weekly   = w["resets_at"];
+  if (w["cost_usd"].is<double>())   { out.cost_weekly_usd  = w["cost_usd"]; out.cost_weekly_present = true; }
+  if (w["messages"].is<uint32_t>()) { out.msgs_weekly      = w["messages"]; out.msgs_weekly_present = true; }
+
+  // today (optional whole object)
   if (!doc["today"].isNull()) {
-    out.today_tokens   = doc["today"]["tokens"]   | 0;
-    out.today_sessions = doc["today"]["sessions"] | 0;
+    auto t = doc["today"];
+    out.tok_today      = t["tokens"]   | 0;
+    out.msgs_today     = t["messages"] | 0;
+    out.cost_today_usd = t["cost_usd"] | 0.0;
     out.today_present  = true;
-  } else {
-    out.today_present  = false;
   }
+
   out.valid = true;
   return true;
 }
@@ -735,42 +929,70 @@ Create `firmware/test/test_api/test_api.cpp`:
 
 void test_valid_payload() {
   const char* body = R"({
-    "ts": 1745673120, "plan": "Max 5x",
-    "window_5h": {"percent": 47, "used_tokens": 342000, "limit_tokens": 720000, "resets_at": 1745682000},
-    "weekly":    {"percent": 18, "used_tokens": 1800000, "limit_tokens": 10000000, "resets_at": 1746057600},
-    "today":     {"tokens": 5200000, "sessions": 14}
+    "ts": 1777735800, "plan": "Max 5x",
+    "block_5h": {"used_tokens": 1017862, "started_at": 1777734000, "resets_at": 1777752000,
+                 "cost_usd": 1.81, "messages": 11, "burn_rate_tpm": 82684},
+    "weekly":   {"used_tokens": 5400000, "started_at": 1777718313, "resets_at": 1778323113,
+                 "cost_usd": 23.69, "messages": 47},
+    "today":    {"tokens": 2100000, "messages": 14, "cost_usd": 5.62}
   })";
   UsageData u;
   TEST_ASSERT_TRUE(parseUsageJson(body, u));
-  TEST_ASSERT_EQUAL_UINT32(1745673120, u.ts);
+  TEST_ASSERT_EQUAL_UINT32(1777735800, u.ts);
   TEST_ASSERT_EQUAL_STRING("Max 5x", u.plan);
-  TEST_ASSERT_EQUAL_UINT8(47, u.pct_5h);
-  TEST_ASSERT_EQUAL_UINT8(18, u.pct_weekly);
+  TEST_ASSERT_EQUAL_UINT64(1017862, u.tok_5h);
+  TEST_ASSERT_EQUAL_UINT32(1777734000, u.started_5h);
+  TEST_ASSERT_EQUAL_UINT32(1777752000, u.reset_5h);
+  TEST_ASSERT_EQUAL_UINT32(82684, u.burn_tpm);
+  TEST_ASSERT_TRUE(u.burn_present);
+  TEST_ASSERT_EQUAL_UINT64(5400000, u.tok_weekly);
+  TEST_ASSERT_EQUAL_UINT32(1777718313, u.started_weekly);
+  TEST_ASSERT_EQUAL_UINT32(1778323113, u.reset_weekly);
   TEST_ASSERT_TRUE(u.today_present);
-  TEST_ASSERT_EQUAL_UINT64(5200000, u.today_tokens);
+  TEST_ASSERT_EQUAL_UINT64(2100000, u.tok_today);
 }
 
 void test_missing_today_is_ok() {
   const char* body = R"({
     "ts": 1, "plan": "x",
-    "window_5h":{"percent":0,"used_tokens":0,"limit_tokens":1,"resets_at":0},
-    "weekly":   {"percent":0,"used_tokens":0,"limit_tokens":1,"resets_at":0}
+    "block_5h":{"used_tokens":0,"started_at":0,"resets_at":0},
+    "weekly":  {"used_tokens":0,"started_at":0,"resets_at":0}
   })";
   UsageData u;
   TEST_ASSERT_TRUE(parseUsageJson(body, u));
   TEST_ASSERT_FALSE(u.today_present);
+  TEST_ASSERT_FALSE(u.burn_present);
+  TEST_ASSERT_FALSE(u.cost_5h_present);
+}
+
+void test_missing_burn_is_ok() {
+  const char* body = R"({
+    "ts":1,"plan":"x",
+    "block_5h":{"used_tokens":42000,"started_at":1,"resets_at":2,"cost_usd":0.08,"messages":1},
+    "weekly":  {"used_tokens":42000,"started_at":1,"resets_at":2}
+  })";
+  UsageData u;
+  TEST_ASSERT_TRUE(parseUsageJson(body, u));
+  TEST_ASSERT_FALSE(u.burn_present);
+  TEST_ASSERT_TRUE(u.cost_5h_present);
+  TEST_ASSERT_TRUE(u.msgs_5h_present);
 }
 
 void test_malformed_rejects() {
   UsageData u;
   TEST_ASSERT_FALSE(parseUsageJson("not json", u));
   TEST_ASSERT_FALSE(parseUsageJson("{}", u));
+  // Missing required block_5h.started_at:
+  TEST_ASSERT_FALSE(parseUsageJson(
+    R"({"ts":1,"plan":"x","block_5h":{"used_tokens":0,"resets_at":0},"weekly":{"used_tokens":0,"started_at":0,"resets_at":0}})",
+    u));
 }
 
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_valid_payload);
   RUN_TEST(test_missing_today_is_ok);
+  RUN_TEST(test_missing_burn_is_ok);
   RUN_TEST(test_malformed_rejects);
   return UNITY_END();
 }
@@ -779,7 +1001,7 @@ int main(int, char**) {
 - [ ] **Step 6: Run native tests**
 
 Run: `pio test -e native`
-Expected: 3 tests pass.
+Expected: 4 tests pass.
 
 - [ ] **Step 7: Wire the HTTP server**
 
@@ -828,7 +1050,8 @@ static void handleData() {
   g_dirty = true;
   g_last_post_ms = millis();
   xSemaphoreGive(g_mutex);
-  Serial.printf("[api] state updated pct_5h=%u pct_w=%u\n", parsed.pct_5h, parsed.pct_weekly);
+  Serial.printf("[api] state updated tok_5h=%llu tok_w=%llu\n",
+                (unsigned long long)parsed.tok_5h, (unsigned long long)parsed.tok_weekly);
   server.send(200, "text/plain", "ok");
 }
 
@@ -858,8 +1081,8 @@ void loop() {
 - [ ] **Step 8: Flash, send a fixture, observe state log**
 
 Run on device: `pio run -t upload && pio device monitor`
-Run on Mac: `cd mac && ./test-push.sh fixtures/edge-cases/zero.json`
-Expected (device serial): `[api] state updated pct_5h=0 pct_w=0` and `200 OK` returned to curl.
+Run on Mac: `cd mac && ./test-push.sh fixtures/edge-cases/idle.json`
+Expected (device serial): `[api] state updated tok_5h=0 tok_w=0` and `200 OK` returned to curl.
 
 - [ ] **Step 9: Commit**
 
@@ -870,89 +1093,133 @@ git add firmware/src/state.h firmware/src/api.h firmware/src/api.cpp \
 git commit -m "firmware: HTTP /data endpoint + native-tested JSON parser"
 ```
 
-### Task 13: LovyanGFX panel init + draw "OK"
+### Task 13: LCD init via vendored Waveshare BSP + 1-bit canvas; draw "OK"
 
 **Files:**
 - Create: `firmware/src/display.h`
 - Create: `firmware/src/display.cpp`
-- Modify: `firmware/src/main.cpp`
+- Vendor:  `firmware/src/display_bsp.h`, `firmware/src/display_bsp.cpp`
+- Modify:  `firmware/src/main.cpp`
+- Modify:  `firmware/platformio.ini` (no LovyanGFX panel class needed; keep lib for `LGFX_Sprite`)
 
-- [ ] **Step 1: Adapt the panel config from Task 2's notes into `display.cpp`**
+Background: the Waveshare ESP32-S3-RLCD-4.2 ships a Sitronix ST7305 mono reflective LCD with a non-linear 4×2 tile framebuffer. There is **no upstream LovyanGFX panel driver**. Strategy (per `docs/superpowers/notes/2026-04-26-lcd-driver.md` Option A): vendor Waveshare's `display_bsp.{h,cpp}` from their official demo for chip init + tile-packing blit; use `LGFX_Sprite` (color depth 1) as the linear 1-bpp canvas the renderer draws into; on commit, walk the canvas buffer with the BSP's tile-packer and push to the panel.
 
-Skeleton (real values from Task 2's notes go into the constructor body):
+- [ ] **Step 1: Vendor Waveshare's `display_bsp.{h,cpp}`**
 
-```cpp
-// firmware/src/display.cpp
-#include "display.h"
-#include <LovyanGFX.hpp>
+From the demo zip referenced in `docs/superpowers/notes/2026-04-26-lcd-driver.md`, copy the two files into `firmware/src/`. Before copying, run `head -30` on each to confirm there's no incompatible license header — if there is, escalate. Strip any unrelated includes (e.g. board-specific touch / SD bringup) so the file only initializes the LCD.
 
-class PanelRLCD42 : public lgfx::LGFX_Device {
-  lgfx::Panel_XXX     _panel;     // <-- driver class from Task 2
-  lgfx::Bus_SPI       _bus;
-public:
-  PanelRLCD42() {
-    auto bcfg = _bus.config();
-    bcfg.spi_host  = SPI2_HOST;
-    bcfg.spi_mode  = 0;
-    bcfg.freq_write = 40000000;
-    bcfg.pin_sclk  = 0;  // <-- from Task 2
-    bcfg.pin_mosi  = 0;
-    bcfg.pin_miso  = -1;
-    bcfg.pin_dc    = 0;
-    _bus.config(bcfg);
-    _panel.setBus(&_bus);
+The two BSP entry points we depend on:
 
-    auto pcfg = _panel.config();
-    pcfg.pin_cs   = 0;   // <-- from Task 2
-    pcfg.pin_rst  = 0;
-    pcfg.pin_busy = -1;
-    pcfg.panel_width  = 300;
-    pcfg.panel_height = 400;
-    pcfg.offset_rotation = 1;   // landscape
-    _panel.config(pcfg);
-    setPanel(&_panel);
-  }
-};
-
-static PanelRLCD42 lcd;
-
-void displayInit() {
-  lcd.init();
-  lcd.setRotation(1);            // 400×300 landscape
-  lcd.fillScreen(TFT_WHITE);
-  lcd.setTextColor(TFT_BLACK);
-  lcd.setTextSize(3);
-  lcd.setCursor(20, 20);
-  lcd.print("OK");
-}
-
-LGFX& displayDevice() { return lcd; }
+```c
+// display_bsp.h (vendored verbatim)
+void  display_bsp_init(void);                            // chip reset + init seq + sleep-out (~250 ms)
+void  display_bsp_blit_1bpp(const uint8_t* canvas);      // canvas is W*H/8 packed bytes,
+                                                         // row-major, 0=white 1=black, native 300x400
 ```
 
-`display.h`:
+Adjust the function names to whatever the vendor file exposes — the `display.cpp` wrapper below decouples renderers from these names.
+
+- [ ] **Step 2: `display.h`**
 
 ```cpp
 // firmware/src/display.h
 #pragma once
 #include <LovyanGFX.hpp>
+
+// Initializes the LCD and the 1-bit canvas. Must be called from setup().
 void displayInit();
-LGFX& displayDevice();
+
+// Renderer draws into this 400x300 1-bpp sprite. (Software rotation: the
+// vendor BSP expects 300x400 native; our canvas is 400x300 landscape and
+// displayCommit() rotates while packing.)
+LGFX_Sprite& displayCanvas();
+
+// Pushes the canvas to the panel. Call once per dirty render, not per draw op.
+void displayCommit();
 ```
 
-- [ ] **Step 2: Call `displayInit()` from `setup()`**
+- [ ] **Step 3: `display.cpp` — wraps BSP, owns the canvas, does landscape→native rotation**
 
-Add `#include "display.h"` and call `displayInit();` in `setup()` before `connectWifi()`.
+```cpp
+// firmware/src/display.cpp
+#include "display.h"
+extern "C" {
+  #include "display_bsp.h"
+}
 
-- [ ] **Step 3: Flash, observe**
+static LGFX_Sprite g_canvas;
+static uint8_t     g_native_fb[300 * 400 / 8];   // 15000 bytes; native portrait packed 1-bpp
+
+void displayInit() {
+  display_bsp_init();
+  g_canvas.setColorDepth(1);
+  // Palette: index 0 = white (background, off-pixel), index 1 = black (ink).
+  g_canvas.setPaletteColor(0, 0xFFFFFF);
+  g_canvas.setPaletteColor(1, 0x000000);
+  g_canvas.createSprite(400, 300);
+  g_canvas.fillScreen(0);
+  displayCommit();
+}
+
+LGFX_Sprite& displayCanvas() { return g_canvas; }
+
+void displayCommit() {
+  // Walk the landscape canvas (400 wide × 300 tall) and pack pixels into
+  // the native portrait framebuffer (300 wide × 400 tall) row-major 1-bpp.
+  // Each native pixel (nx, ny) corresponds to canvas (cx=ny, cy=300-1-nx).
+  // (This matches a 90° clockwise rotation; flip if the panel reads upside-down.)
+  for (int ny = 0; ny < 400; ++ny) {
+    for (int nx = 0; nx < 300; ++nx) {
+      int cx = ny;
+      int cy = 299 - nx;
+      bool ink = g_canvas.readPixelValue(cx, cy) != 0;
+      int bit_index = ny * 300 + nx;
+      uint8_t mask = 1 << (7 - (bit_index & 7));
+      uint8_t& byte = g_native_fb[bit_index >> 3];
+      if (ink) byte |=  mask;
+      else     byte &= ~mask;
+    }
+  }
+  display_bsp_blit_1bpp(g_native_fb);
+}
+```
+
+> **Caveat:** the rotation choice (which corner is "up") and any horizontal
+> mirroring must be confirmed empirically on first flash — flip `cx`/`cy` mappings
+> if "OK" appears upside-down or mirrored. The exact form depends on the panel's
+> default scan direction, which Task 2's notes record but the renderer doesn't
+> need to reason about.
+
+- [ ] **Step 4: Draw "OK" from `displayInit()` after canvas creation**
+
+Insert before the trailing `displayCommit()` in `displayInit()`:
+
+```cpp
+g_canvas.setTextColor(1);            // ink
+g_canvas.setTextSize(3);
+g_canvas.setCursor(20, 20);
+g_canvas.print("OK");
+```
+
+- [ ] **Step 5: Call `displayInit()` from `setup()`**
+
+In `firmware/src/main.cpp`, add `#include "display.h"` and call `displayInit();` in `setup()` immediately after `Serial.begin/println` and before `connectWifi()`.
+
+- [ ] **Step 6: Flash and observe**
 
 Run: `pio run -t upload && pio device monitor`
-Expected: panel shows "OK" in the upper-left.
+Expected: panel shows "OK" in the upper-left of the landscape view. If the
+text is rotated/mirrored, swap the rotation mapping in `displayCommit()` and
+reflash.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add firmware/src/display.h firmware/src/display.cpp firmware/src/main.cpp
-git commit -m "firmware: LovyanGFX panel init draws OK"
+git add firmware/src/display.h firmware/src/display.cpp \
+        firmware/src/display_bsp.h firmware/src/display_bsp.cpp \
+        firmware/src/main.cpp firmware/platformio.ini
+git commit -m "firmware: vendored ST7305 BSP + 1-bpp canvas; draws OK"
+git push origin main
 ```
 
 ### Task 14: Render — header strip
@@ -980,30 +1247,31 @@ void renderTick(const UsageData& s, bool stale, bool wifi_ok, uint32_t ms_since_
 // firmware/src/render.cpp
 #include "render.h"
 #include "display.h"
-#include <time.h>
 
-static LGFX* d = nullptr;
+static LGFX_Sprite* d = nullptr;
+static constexpr uint8_t INK = 1;
+static constexpr uint8_t BG  = 0;
 
-void renderInit() { d = &displayDevice(); }
+void renderInit() { d = &displayCanvas(); }
 
 static void drawHeader(const UsageData& s, bool wifi_ok) {
-  d->fillRect(0, 0, 400, 24, TFT_WHITE);
-  d->setCursor(8, 4);
+  d->fillRect(0, 0, 400, 24, BG);
+  d->setTextColor(INK);
   d->setTextSize(2);
-  d->setTextColor(TFT_BLACK);
+  d->setCursor(8, 4);
   d->printf("CLAUDE CODE  %s", s.plan[0] ? s.plan : "");
   if (!wifi_ok) {
     d->setCursor(380, 4);
-    d->print("!");          // simple Wi-Fi-down marker
+    d->print("!");          // simple Wi-Fi-down marker; refined in Task 18
   }
-  // separator line
-  d->drawLine(0, 24, 400, 24, TFT_BLACK);
+  d->drawLine(0, 24, 400, 24, INK);
 }
 
 void renderTick(const UsageData& s, bool stale, bool wifi_ok, uint32_t ms_since_post) {
   (void)stale; (void)ms_since_post;          // used in later tasks
-  d->fillScreen(TFT_WHITE);
+  d->fillScreen(BG);
   drawHeader(s, wifi_ok);
+  displayCommit();
 }
 ```
 
@@ -1036,67 +1304,140 @@ git add firmware/src/render.h firmware/src/render.cpp firmware/src/main.cpp
 git commit -m "firmware: render header strip"
 ```
 
-### Task 15: Render — 5h and weekly sections
+### Task 15: Render — 5h and weekly sections (tokens-first, time-progress bar)
 
 **Files:**
 - Modify: `firmware/src/render.cpp`
 
-- [ ] **Step 1: Add bar+number drawing functions**
+The dominant figure on each row is **tokens used** (compact K/M format). The bar's fill represents **time progress through the window**: `(now − started_at) / (resets_at − started_at)`. The meta line below shows `$cost · N msg · burnK/min` (left) and `resets in NN` (right). See spec §7.
+
+- [ ] **Step 1: Add formatting helpers**
 
 ```cpp
-// at top of render.cpp
-static void drawWindow(int y, const char* label, uint8_t pct,
-                       uint64_t used, uint64_t limit, uint32_t resets_at, uint32_t now) {
+// near the top of render.cpp
+static void formatTokens(uint64_t n, char* out, size_t sz) {
+  if      (n >= 1000000ULL) snprintf(out, sz, "%.1fM", n / 1000000.0);
+  else if (n >= 1000ULL)    snprintf(out, sz, "%uK", (unsigned)(n / 1000));
+  else                      snprintf(out, sz, "%u",  (unsigned)n);
+}
+
+static int textWidth(LGFX_Sprite* d, const char* s, int size) {
+  return d->textWidth(s) * size / d->textsize_x;   // approximate; refined empirically
+}
+```
+
+- [ ] **Step 2: Add the `drawWindow` for tokens + time-progress bar**
+
+```cpp
+static void drawWindow(int y, const char* label, uint64_t used,
+                       uint32_t started, uint32_t resets, uint32_t now,
+                       const char* meta_left, const char* meta_right) {
+  // Label (top-left, size 2)
   d->setTextSize(2);
+  d->setTextColor(INK);
   d->setCursor(8, y);
   d->print(label);
 
-  // big percent number, right-aligned-ish
+  // Big tokens (top-right, size 4)
+  char tok_str[16];
+  formatTokens(used, tok_str, sizeof tok_str);
   d->setTextSize(4);
-  d->setCursor(280, y - 6);
-  d->printf("%3u%%", pct);
+  int tw = textWidth(d, tok_str, 4);
+  d->setCursor(392 - tw, y - 6);
+  d->print(tok_str);
 
-  // bar
+  // Time-progress bar: full width, fill = elapsed / total
   int barY = y + 28;
-  d->drawRect(8, barY, 384, 16, TFT_BLACK);
-  int fill = (pct > 100 ? 100 : pct) * 380 / 100;
-  d->fillRect(10, barY + 2, fill, 12, TFT_BLACK);
+  d->drawRect(8, barY, 384, 16, INK);
+  if (resets > started) {
+    uint32_t total   = resets - started;
+    uint32_t elapsed = (now > started) ? (now - started) : 0;
+    if (elapsed > total) elapsed = total;
+    int fill = (int)((uint64_t)elapsed * 380 / total);
+    if (fill > 0) d->fillRect(10, barY + 2, fill, 12, INK);
+  }
 
-  // meta line
+  // Meta line (size 1)
   d->setTextSize(1);
   d->setCursor(8, barY + 22);
-  d->printf("%llu / %llu tokens", (unsigned long long)used, (unsigned long long)limit);
-
-  if (resets_at > now) {
-    uint32_t rem = resets_at - now;
-    d->setCursor(220, barY + 22);
-    d->printf("resets in %lus", (unsigned long)rem);  // refined later
+  d->print(meta_left);
+  if (meta_right[0]) {
+    int rw = textWidth(d, meta_right, 1);
+    d->setCursor(392 - rw, barY + 22);
+    d->print(meta_right);
   }
 }
-```
 
-(Reset countdown formatting will be cleaned up in Task 16.)
+// Compose the 5h-block meta strings from optional fields. fmtDuration is
+// added in Task 16 — for now leave a stub so this compiles.
+static void fmtDuration(uint32_t secs, char* out, size_t n);  // forward-decl
 
-- [ ] **Step 2: Call from `renderTick`**
+static void buildMeta5h(const UsageData& s,
+                        char* left, size_t lsz, char* right, size_t rsz) {
+  char m[16] = "", b[16] = "";
+  if (s.msgs_5h_present) snprintf(m, sizeof m, " · %u msg", s.msgs_5h);
+  if (s.burn_present)    snprintf(b, sizeof b, " · %uK/min", s.burn_tpm / 1000);
+  if (s.cost_5h_present) snprintf(left, lsz, "$%.2f%s%s", s.cost_5h_usd, m, b);
+  else                   left[0] = 0;
+  if (s.reset_5h > s.ts) {
+    char buf[16]; fmtDuration(s.reset_5h - s.ts, buf, sizeof buf);
+    snprintf(right, rsz, "resets in %s", buf);
+  } else right[0] = 0;
+}
 
-```cpp
-void renderTick(const UsageData& s, bool stale, bool wifi_ok) {
-  d->fillScreen(TFT_WHITE);
-  drawHeader(s, wifi_ok);
-  drawWindow( 36, "5H WINDOW", s.pct_5h,     s.tok_5h_used,     s.tok_5h_limit,     s.reset_5h,     s.ts);
-  drawWindow(140, "WEEKLY",    s.pct_weekly, s.tok_weekly_used, s.tok_weekly_limit, s.reset_weekly, s.ts);
+static void buildMetaWeekly(const UsageData& s,
+                            char* left, size_t lsz, char* right, size_t rsz) {
+  char m[16] = "";
+  if (s.msgs_weekly_present) snprintf(m, sizeof m, " · %u msg", s.msgs_weekly);
+  if (s.cost_weekly_present) snprintf(left, lsz, "$%.2f%s", s.cost_weekly_usd, m);
+  else                       left[0] = 0;
+  if (s.reset_weekly > s.ts) {
+    char buf[16]; fmtDuration(s.reset_weekly - s.ts, buf, sizeof buf);
+    snprintf(right, rsz, "resets in %s", buf);
+  } else right[0] = 0;
 }
 ```
 
-- [ ] **Step 3: Flash + post `mac/fixtures/edge-cases/zero.json` then `full.json`, photograph each**
+> Note: `fmtDuration` is defined in Task 16. The forward declaration here keeps
+> compilation green during Task 15 — until Task 16 lands the function body, the
+> meta-right output for both rows will be a linker error if exercised. Easiest
+> path is to do Task 15 and Task 16 back-to-back without flashing in between,
+> or stub the function body in Task 15 with a `snprintf("%us", secs)` and
+> replace it in Task 16.
 
-Verify both bars render at 0% and 100%; numbers display sensibly; layout fits within 300 px height.
+- [ ] **Step 3: Wire into `renderTick`**
 
-- [ ] **Step 4: Commit**
+```cpp
+void renderTick(const UsageData& s, bool stale, bool wifi_ok, uint32_t ms_since_post) {
+  d->fillScreen(BG);
+  drawHeader(s, wifi_ok);
+  if (!s.valid) { displayCommit(); return; }   // Task 17 fills this in
+
+  char l5[40], r5[24], lw[40], rw[24];
+  buildMeta5h(s,    l5, sizeof l5, r5, sizeof r5);
+  buildMetaWeekly(s, lw, sizeof lw, rw, sizeof rw);
+
+  drawWindow( 36, "5H BLOCK", s.tok_5h,     s.started_5h,     s.reset_5h,     s.ts, l5, r5);
+  drawWindow(140, "WEEKLY",   s.tok_weekly, s.started_weekly, s.reset_weekly, s.ts, lw, rw);
+
+  (void)stale; (void)ms_since_post;          // used in Task 16's footer
+  displayCommit();
+}
+```
+
+- [ ] **Step 4: Flash + post `mac/fixtures/edge-cases/idle.json` then `full.json`, photograph each**
+
+- `idle.json` → both rows show `0` tokens, bars empty, meta line `$0.00 · 0 msg`.
+- `full.json` → tokens show as `24.5M` / `312.0M`; both bars near full (depending on `started/resets/now` choice in fixture); meta line shows large $ and message counts.
+
+Adjust text positions if tokens like `312.0M` don't fit at size-4 within the 400 px width.
+
+- [ ] **Step 5: Commit**
 
 ```bash
 git add firmware/src/render.cpp
-git commit -m "firmware: render 5h and weekly sections"
+git commit -m "firmware: render tokens-first 5h block + weekly with time-progress bar"
+git push origin main
 ```
 
 ### Task 16: Render — footer, STALE, and reset countdown formatting
@@ -1135,14 +1476,19 @@ Replace the temporary `%lus` block at the bottom of `drawWindow` with:
 ```cpp
 static void drawFooter(const UsageData& s, bool stale, uint32_t now_ms_since_post) {
   int y = 270;
-  d->drawLine(0, y - 4, 400, y - 4, TFT_BLACK);
+  d->drawLine(0, y - 4, 400, y - 4, INK);
   d->setTextSize(1);
+  d->setTextColor(INK);
   d->setCursor(8, y);
   if (s.today_present) {
-    d->printf("Today: %llu tok / %u sess",
-              (unsigned long long)s.today_tokens, s.today_sessions);
+    char tok[16];
+    formatTokens(s.tok_today, tok, sizeof tok);
+    if (s.msgs_today > 0)
+      d->printf("Today: %s tok · %u msg", tok, s.msgs_today);
+    else
+      d->printf("Today: %s tok", tok);
   }
-  d->setCursor(280, y);
+  d->setCursor(270, y);
   if (stale) d->print("STALE  ");
   uint32_t age_min = now_ms_since_post / 60000UL;
   d->printf("upd %lum ago", (unsigned long)age_min);
@@ -1173,15 +1519,17 @@ git commit -m "firmware: footer with STALE detection and reset countdown"
 **Files:**
 - Modify: `firmware/src/render.cpp`
 
-- [ ] **Step 1: Detect "no data yet"**
+- [ ] **Step 1: Fill in the "no data yet" branch in `renderTick`**
 
-In `renderTick`, immediately after `d->fillScreen(TFT_WHITE); drawHeader(s, wifi_ok);` and before the `drawWindow` calls, insert:
+Task 15 already left a stub: `if (!s.valid) { displayCommit(); return; }`. Replace that line with:
 
 ```cpp
 if (!s.valid) {
   d->setTextSize(2);
+  d->setTextColor(INK);
   d->setCursor(80, 130);
   d->print("Waiting for first sync...");
+  displayCommit();
   return;
 }
 ```
@@ -1292,13 +1640,14 @@ git push origin main
 
 ## Self-review checklist (run before handoff)
 
-- [x] Spec §2 goals — primary 5h + weekly + secondary tokens: covered by Tasks 5, 14–16
-- [x] Spec §3 hard constraints — no API (Tasks 1, 5), no Mac listener (Tasks 5, 7), no device-initiated traffic (Tasks 11, 12 — server-only)
-- [x] Spec §4 architecture — Tasks 5–8 (Mac), 9–18 (firmware)
-- [x] Spec §5 components — every file in §5.1 has a creating task
-- [x] Spec §6 wire schema — Task 5 emits, Task 12 parses, native test asserts shape
-- [x] Spec §7 layout — Tasks 14–17
-- [x] Spec §8 data flow — exercised end-to-end in Task 19
-- [x] Spec §9 error handling — STALE in Task 16, waiting screen in Task 17, Wi-Fi indicator in Task 18, malformed JSON in Task 12
-- [x] Spec §10 testing — bats in Tasks 4–6, native unit tests in Task 12, soak in Task 20
-- [x] Spec §11 risks — ccusage validated in Task 1, plan limits in Task 1, LCD driver in Task 2, mDNS in Task 11
+- [x] Spec §1 — tokens-as-soul, time-progress bars, no fake quota: enforced by Tasks 5 (no `percent`/`limit_tokens` in output) and 15 (bar formula uses time, big number is tokens).
+- [x] Spec §2 goals — block + weekly visibility plus time progress: Tasks 5, 14–16.
+- [x] Spec §3 hard constraints — no API (Tasks 1, 5), no Mac listener (Tasks 5, 7 — `curl` outbound only), no device-initiated traffic (Tasks 11, 12 — server-only).
+- [x] Spec §4 architecture — Tasks 5–8 (Mac), 9–18 (firmware).
+- [x] Spec §5 components — every file in §5.1 has a creating task; vendoring in Task 13.
+- [x] Spec §6 wire schema — Task 5 emits the new shape (`block_5h` rename, `started_at`, `cost_usd`, `messages`, `burn_rate_tpm`); Task 12 parses with required-field validation; bats and Unity tests assert the shape.
+- [x] Spec §7 revised layout — Tasks 14, 15, 16 implement tokens-as-big-number + time-progress bar + footer.
+- [x] Spec §8 data flow — exercised end-to-end in Task 19.
+- [x] Spec §9 error handling — STALE in Task 16, waiting screen in Task 17, Wi-Fi indicator in Task 18, malformed JSON in Task 12.
+- [x] Spec §10 testing — bats in Tasks 4–6, native unit tests in Task 12, manual fixture POSTing in Task 8, soak in Task 20.
+- [x] Spec §11 risks — Tasks 1+2 closed the ccusage and LCD-driver risks (notes referenced); §11.2 weekly-clock approximation lands in Task 5; §11.4 mDNS validated in Task 11.

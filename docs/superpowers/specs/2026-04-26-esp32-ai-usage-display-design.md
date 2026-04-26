@@ -6,18 +6,28 @@
 
 ## 1. Purpose
 
-A desk-mounted, always-on, dimly-lit-room-friendly display that shows the user's
-**Claude Code 5-hour rolling window** quota and **weekly window** quota at a
-glance, with token usage as a secondary metric.
+A desk-mounted, always-on, dimly-lit-room-friendly display that shows, at a
+glance, the user's **Claude Code 5-hour-block token usage** and **weekly-window
+token usage** — with the absolute token count as the dominant figure on each
+row, plus supporting cost / message / burn-rate fields.
 
 The display is driven by data parsed locally from the user's Mac — no calls to
 Anthropic's API, no listening services on the Mac.
+
+> **Why no quota percentages?** Anthropic does not publish exact token caps for
+> consumer plans (their published limits are in messages or model-hours, with
+> wide ranges that vary by conversation cache hit rate). Computing
+> `tokens_used / fabricated_cap × 100%` would be a fiction. The device shows
+> only numbers we can derive truthfully.
 
 ## 2. Goals & non-goals
 
 ### Goals
 
-- See current 5-hour and weekly quota burn at a glance from across the desk.
+- See current 5-hour-block token usage and weekly-window token usage at a
+  glance from across the desk.
+- Show how far through each window we are **in time** (block elapsed / 5 h;
+  week elapsed / 7 d), as an honest progress indicator.
 - Update at most 60 s after Claude usage actually changes.
 - Survive Mac sleep / Wi-Fi flap / device reboot without manual intervention.
 - One-time setup; no maintenance interaction.
@@ -102,12 +112,16 @@ esp32-ai-usage-display/
 - **launchd plist**: `RunAtLoad=true`, `StartInterval=60`, `StandardOutPath` and
   `StandardErrorPath` to `~/Library/Logs/ai-usage-push.log`.
 - **push-usage.sh** (bash):
-  1. Resolve plan limits from constants at top of script (Max 5x).
-  2. Run `ccusage` (or fallback inline jsonl parse) to get token usage events.
-  3. Aggregate the trailing 5-hour window and the current weekly window
-     (per Anthropic's policy — to be confirmed during implementation, see
-     §11.2); compute percent against plan limits; compute today's totals;
-     compute the next reset epoch for each window.
+  1. Run `ccusage blocks --active --json` for the current 5-hour block — gives
+     `started_at`, `resets_at` (= started_at + 5 h), `used_tokens`, `cost_usd`,
+     `burn_rate_tpm`, `messages` directly. Empty `blocks: []` means "idle ≥5 h
+     since last session" — emit zeros and a synthetic block boundary.
+  2. Compute the **weekly window** locally: scan `~/.claude/projects/**/*.jsonl`
+     for `type=="user"` events with `timestamp >= now - 168 h`; the minimum
+     timestamp is `weekly.started_at`; `weekly.resets_at = started_at + 7 d`;
+     `used_tokens` is summed from `ccusage daily --json` for the days inside
+     this window. Cost and message counts likewise.
+  3. Compute today's totals from `ccusage daily --json` (current local date).
   4. Emit JSON conforming to §6.
   5. POST to `http://${HOST}/data`, retry once on transient curl error, log
      non-zero exits.
@@ -122,16 +136,24 @@ esp32-ai-usage-display/
 - **main.cpp**: connect Wi-Fi → start mDNS as `ai-usage-display` → start HTTP
   server on `:80` with `POST /data` → enter render loop.
 - **api.cpp**: parses request body with ArduinoJson; validates required fields
-  (`ts`, `window_5h.percent`, `weekly.percent`); on success copies into the
-  `UsageData` global behind a mutex, sets `dirty=true`, returns `200`. On
-  malformed input returns `400` and leaves state untouched.
-- **state.h**: `UsageData { uint32_t ts; uint8_t pct_5h; uint8_t pct_weekly;
-  uint64_t tok_5h; uint64_t tok_weekly_used; … char plan[16]; }`. A boolean
-  `dirty` flag plus a mutex. A separate `uint32_t last_post_millis` tracks when
-  the last successful POST landed (for STALE detection — see §8).
-- **display.cpp**: LovyanGFX panel init (driver model TBD against Waveshare's
-  Arduino sample; copy from their reference repo). Rotation is set to landscape
-  so the framebuffer is 400 wide × 300 tall.
+  (`ts`, `block_5h.used_tokens`, `block_5h.started_at`, `block_5h.resets_at`,
+  `weekly.used_tokens`, `weekly.started_at`, `weekly.resets_at`); on success
+  copies into the `UsageData` global behind a mutex, sets `dirty=true`,
+  returns `200`. On malformed input returns `400` and leaves state untouched.
+- **state.h**: `UsageData { uint32_t ts; char plan[16]; uint64_t tok_5h;
+  uint32_t started_5h; uint32_t reset_5h; double cost_5h_usd; uint32_t msgs_5h;
+  uint32_t burn_tpm; uint64_t tok_weekly; uint32_t started_weekly;
+  uint32_t reset_weekly; double cost_weekly_usd; uint32_t msgs_weekly;
+  uint64_t tok_today; uint32_t msgs_today; double cost_today_usd; bool valid;
+  }`. A boolean `dirty` flag plus a mutex. A separate `uint32_t last_post_millis`
+  tracks when the last successful POST landed (for STALE detection — see §8).
+- **display.cpp**: LovyanGFX is **not** used as a panel-class wrapper because
+  the panel is a Sitronix ST7305 mono reflective LCD (1 bpp, non-linear 4×2
+  tile framebuffer) and no upstream LovyanGFX driver exists. We vendor
+  Waveshare's `display_bsp.{h,cpp}` for the low-level chip init and use
+  `LGFX_Sprite` + `DisplayPort` to compose frames in a 1-bit canvas, then blit.
+  See `docs/superpowers/notes/2026-04-26-lcd-driver.md`. Rotation: software
+  rotation in the canvas → 400 × 300 landscape.
 - **render.cpp**: draws the B1 layout (§7). Implements full-frame redraws on
   dirty; checks STALE every tick.
 
@@ -144,53 +166,82 @@ seconds (UTC).
 {
   "ts":        1745673120,
   "plan":      "Max 5x",
-  "window_5h": {
-    "percent":      47,
-    "used_tokens":  342000,
-    "limit_tokens": 720000,
-    "resets_at":    1745682000
+  "block_5h": {
+    "used_tokens":   1017862,
+    "started_at":    1745655120,
+    "resets_at":     1745673120,
+    "cost_usd":      1.81,
+    "messages":      11,
+    "burn_rate_tpm": 82684
   },
   "weekly": {
-    "percent":      18,
-    "used_tokens":  1800000,
-    "limit_tokens": 10000000,
-    "resets_at":    1746057600
+    "used_tokens": 5400000,
+    "started_at":  1745222400,
+    "resets_at":   1745827200,
+    "cost_usd":    24.50,
+    "messages":    47
   },
   "today": {
-    "tokens":   5200000,
-    "sessions": 14
+    "tokens":   2100000,
+    "messages": 14,
+    "cost_usd": 5.62
   }
 }
 ```
 
-Required: `ts`, `plan`, `window_5h.percent`, `weekly.percent`. Other fields are
-displayed when present and rendered as `—` when absent (forward-compatible).
+**Required** (POST is rejected with 400 if missing): `ts`, `plan`,
+`block_5h.used_tokens`, `block_5h.started_at`, `block_5h.resets_at`,
+`weekly.used_tokens`, `weekly.started_at`, `weekly.resets_at`.
 
-## 7. Layout (B1, landscape 400×300)
+**Optional** (rendered when present, omitted gracefully otherwise):
+`block_5h.{cost_usd,messages,burn_rate_tpm}`, `weekly.{cost_usd,messages}`,
+the entire `today` object, and any future fields (forward-compatible).
+
+**Notes:**
+- `started_at` is the absolute epoch at which the window began (5h block: aligned
+  to clock boundary; weekly: the user's first session timestamp in the trailing
+  168 h, scanned from local `~/.claude/projects/**/*.jsonl`).
+- The device computes time-progress as `(now − started_at) / (resets_at − started_at)`
+  and tokens as the bare `used_tokens` figure. There is no quota / percent /
+  limit field — by design (see §1).
+- All field names use lower-snake-case; epoch fields are `uint32_t`-safe through
+  2106; token counts are `uint64_t`-safe.
+
+## 7. Layout (B1-revised, landscape 400×300)
 
 ```
 ┌──────────────────────────────────────────────────┐  ← 400 px
 │ CLAUDE CODE · MAX 5X              14:32          │  header (border-bottom)
 ├──────────────────────────────────────────────────┤
-│ 5H WINDOW                              47%       │  big number
-│ ████████████████░░░░░░░░░░░░░░░░░░░░░░           │  full-width bar
-│ 342K / 720K tokens          resets 16:45 · 2h13m │  meta line
+│ 5H BLOCK                              1.0M       │  big number = used tokens
+│ ████████████████░░░░░░░░░░░░░░░░░░░░░░           │  bar = TIME progress (block elapsed / 5h)
+│ $1.81 · 11 msg · 83K/min        resets in 4h30m  │  meta line
 │                                                  │
-│ WEEKLY                                 18%       │
-│ ███████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░           │
-│ 1.8M / 10M tokens         resets Sun 00:00 · 4d  │
+│ WEEKLY                                5.4M       │
+│ ███░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░             │  bar = TIME progress (week elapsed / 7d)
+│ $24.50 · 47 msg                resets in 6d 4h   │
 ├──────────────────────────────────────────────────┤
-│ Today: 5.2M tok · 14 sessions     Updated 14:32  │
+│ Today: 2.1M tok · 14 msg          Updated 14:32  │
 └──────────────────────────────────────────────────┘  ← 300 px
 ```
 
-- Monospace, heavy weight, high contrast (RLCD favors block shapes over
-  hairlines).
-- Colors: black on the panel's natural off-white. No grayscale gradients in
-  bars — solid fill. Color use deliberately deferred until v2 once we measure
-  how the panel actually reproduces tints.
-- All text sizes chosen so the two big percentages and both bars are
-  legible from ~1.5 m.
+**Key design choices:**
+
+- The dominant figure on each row is **tokens-used** (e.g. `1.0M`, `5.4M`),
+  formatted compactly (K / M suffixes). This is the "soul number" — the
+  user's stated primary metric.
+- The bar's fill is **time progress**, not quota. Bar fraction =
+  `(now − started_at) / (resets_at − started_at)`, clamped to [0, 1]. This is
+  factual — there is no fictional cap underlying it.
+- The meta line carries supporting numbers — cost in USD, message count, and
+  (for the 5 h block only) instantaneous burn rate in tokens-per-minute.
+- Footer summarises today's local-day totals plus a freshness timestamp; goes
+  STALE per §8 when the last push is > 5 min old.
+- Monospace, heavy weight, high contrast. The panel is a 1 bpp mono reflective
+  LCD (Sitronix ST7305) — solid black on off-white, no greys, no colors. Bars
+  are solid-fill rectangles.
+- All text sizes chosen so the two big token figures and both bars are legible
+  from ~1.5 m.
 
 ## 8. Data flow (one cycle)
 
@@ -239,17 +290,34 @@ fresh data.
 
 ## 11. Risks & open questions
 
-1. **`ccusage` capability gap.** I have not verified that ccusage natively
-   exposes the 5-hour rolling window and weekly window aggregates. If it does
-   not, `push-usage.sh` falls back to: walk `~/.claude/projects/**/*.jsonl`,
-   sum input+output token deltas in the trailing windows. This is the first
-   thing to validate during implementation.
-2. **Plan-limit constants.** Anthropic's exact token caps for "Max 5x" on the
-   5-hour and weekly windows must be confirmed (from public docs or empirical
-   observation) before percentages are meaningful.
-3. **LCD driver model**. Waveshare's wiki references the driver but doesn't
-   give a one-line LovyanGFX panel config. Implementation step: copy and adapt
-   from their official Arduino sample.
+1. **ccusage 5h-block coverage — confirmed adequate.** `ccusage blocks --active
+   --json` exposes `startTime`, `endTime`, `totalTokens`, `costUSD`,
+   `burnRate.tokensPerMinute`, and entry counts directly. See
+   `docs/superpowers/notes/2026-04-26-ccusage-investigation.md`. **Closed** by
+   Task 1 of the implementation plan.
+2. **Weekly window — Anthropic's clock vs. our local approximation.** Anthropic's
+   weekly limit "resets seven days after your session starts" (per their Max-plan
+   support article), but Claude Code itself does **not** persist the weekly
+   period start anywhere on disk (no local state file, no rate-limit headers in
+   jsonl, `/status` is interactive-only). `push-usage.sh` therefore approximates
+   `weekly.started_at` by scanning `~/.claude/projects/**/*.jsonl` for the
+   earliest `type=="user"` event with `timestamp >= now − 168 h`.
+   - **Single-machine accuracy:** matches Claude Code's `/status` clock
+     to the second.
+   - **Multi-machine drift:** if the user runs Claude Code on more than one
+     machine and this Mac is missing the earliest session of the period, our
+     `weekly.started_at` will be later than the truth, so `weekly.resets_at`
+     will be displayed up to 7 days too late. **Open question for the user:
+     do you use Claude Code on more than this Mac?** If yes, weekly is
+     best-effort and may visibly drift; v1 accepts this.
+   - See `docs/superpowers/notes/2026-04-26-claude-code-state-investigation.md`.
+3. **LCD driver — no upstream LovyanGFX panel class.** The Waveshare ESP32-S3-
+   RLCD-4.2 ships a Sitronix ST7305 mono reflective LCD with a non-linear 4×2
+   tile framebuffer. LovyanGFX has no `Panel_ST7305`. Strategy: vendor
+   Waveshare's `display_bsp.{h,cpp}` for chip init and use `LGFX_Sprite` plus
+   `DisplayPort` to compose frames; blit on every dirty render. Closes the
+   risk identified before Task 2; see
+   `docs/superpowers/notes/2026-04-26-lcd-driver.md`.
 4. **mDNS reliability** on the user's home network: most macOS setups resolve
    `*.local` natively; if not, fallback is a hardcoded IP via a DHCP
    reservation on the router.
