@@ -1,0 +1,6 @@
+{"timestamp":"2026-04-25T10:38:33.947Z","type":"user","sessionId":"abc123","message":{"content":"old, outside 168h window"}}
+{"timestamp":"2026-04-25T10:38:34.012Z","type":"assistant","sessionId":"abc123"}
+{"timestamp":"2026-05-02T10:38:33.947Z","type":"user","sessionId":"abc123","message":{"content":"earliest in-window user event"}}
+{"timestamp":"2026-05-02T10:38:34.012Z","type":"assistant","sessionId":"abc123"}
+{"timestamp":"2026-05-02T15:00:00.000Z","type":"user","sessionId":"abc123","message":{"content":"later in-window event"}}
+{"timestamp":"2026-05-02T15:00:01.000Z","type":"assistant","sessionId":"abc123"}

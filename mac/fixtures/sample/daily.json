@@ -1,0 +1,13 @@
+{
+  "daily": [
+    {"date":"2026-04-26","totalTokens":     0,"totalCost":0.00},
+    {"date":"2026-04-27","totalTokens":     0,"totalCost":0.00},
+    {"date":"2026-04-28","totalTokens":     0,"totalCost":0.00},
+    {"date":"2026-04-29","totalTokens":     0,"totalCost":0.00},
+    {"date":"2026-04-30","totalTokens":     0,"totalCost":0.00},
+    {"date":"2026-05-01","totalTokens":     0,"totalCost":0.00},
+    {"date":"2026-05-02","totalTokens":3100000,"totalCost":13.91},
+    {"date":"2026-05-03","totalTokens":2300000,"totalCost":9.78}
+  ],
+  "totals": { "totalTokens": 5400000, "totalCost": 23.69 }
+}
