@@ -307,9 +307,11 @@ fresh data.
    - **Multi-machine drift:** if the user runs Claude Code on more than one
      machine and this Mac is missing the earliest session of the period, our
      `weekly.started_at` will be later than the truth, so `weekly.resets_at`
-     will be displayed up to 7 days too late. **Open question for the user:
-     do you use Claude Code on more than this Mac?** If yes, weekly is
-     best-effort and may visibly drift; v1 accepts this.
+     will be displayed up to 7 days too late. **Confirmed: the user runs
+     Claude Code on multiple machines.** v1 accepts the drift; weekly is
+     best-effort. v2 candidate enhancements: (a) sync `~/.claude/projects/`
+     across machines with iCloud/Syncthing, (b) have each Mac POST its local
+     earliest-event timestamp to a shared store and reconcile.
    - See `docs/superpowers/notes/2026-04-26-claude-code-state-investigation.md`.
 3. **LCD driver — no upstream LovyanGFX panel class.** The Waveshare ESP32-S3-
    RLCD-4.2 ships a Sitronix ST7305 mono reflective LCD with a non-linear 4×2
