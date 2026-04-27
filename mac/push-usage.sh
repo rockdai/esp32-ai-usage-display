@@ -142,7 +142,10 @@ build_payload() {
           started_at:  $wstart,
           resets_at:   ($wstart + 7*86400),
           cost_usd:    (($win | map(.totalCost  // 0) | add // 0) | cents),
-          messages:    ($win | length)
+          messages:    0
+          # v2 TODO: derive by counting type:user events from
+          # ~/.claude/projects scan with timestamp >= weekly.started_at.
+          # The ccusage daily aggregation does not expose message counts.
         },
         today: (
           if $today == null then
