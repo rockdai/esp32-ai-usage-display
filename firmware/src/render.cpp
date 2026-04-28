@@ -91,11 +91,12 @@ static void drawHeader(const UsageData& s, bool wifi_ok) {
   d->print(plan);
 
   if (!wifi_ok) {
-    // Small "!" tucked above the right-aligned plan text so the two never
-    // collide.
-    d->setTextSize(2);
-    d->setCursor(380, 6);
-    d->print("!");
+    // Small "WiFi?" indicator in the top-right corner above the plan text
+    // (which is at y=22..37). At size 1 the marker is 8 px tall × 30 px
+    // wide, fitting comfortably in the y=0..15 strip at the top right.
+    d->setTextSize(1);
+    d->setCursor(360, 2);
+    d->print("WiFi?");
   }
 
   // Separator at y=44
