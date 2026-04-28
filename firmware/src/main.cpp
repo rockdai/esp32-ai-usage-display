@@ -8,6 +8,7 @@
 #include "state.h"
 #include "api.h"
 #include "display.h"
+#include "render.h"
 
 static WebServer server(80);
 static UsageData g_state;
@@ -51,6 +52,7 @@ void setup() {
   delay(2000);
   Serial.println("[boot] esp32-ai-usage-display v0");
   displayInit();
+  renderInit();
   g_mutex = xSemaphoreCreateMutex();
   connectWifi();
   startMdns();
@@ -66,5 +68,18 @@ void loop() {
     connectWifi();
     startMdns();
   }
+
+  static uint32_t last_render = 0;
+  if (millis() - last_render >= 1000) {
+    last_render = millis();
+    uint32_t age = millis() - g_last_post_ms;
+    bool wifi_ok = WiFi.status() == WL_CONNECTED;
+    bool stale = age > 300000UL;
+    xSemaphoreTake(g_mutex, portMAX_DELAY);
+    UsageData snap = g_state;
+    xSemaphoreGive(g_mutex);
+    renderTick(snap, stale, wifi_ok, age);
+  }
+
   delay(10);
 }
