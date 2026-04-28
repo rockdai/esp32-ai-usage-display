@@ -1,6 +1,7 @@
 // firmware/src/main.cpp
 #include <Arduino.h>
 #include <WiFi.h>
+#include <ESPmDNS.h>
 #include "secrets.h"
 
 static void connectWifi() {
@@ -14,17 +15,28 @@ static void connectWifi() {
   Serial.printf("\n[wifi] OK ip=%s\n", WiFi.localIP().toString().c_str());
 }
 
+static void startMdns() {
+  if (!MDNS.begin("ai-usage-display")) {
+    Serial.println("[mdns] FAILED");
+    return;
+  }
+  MDNS.addService("http", "tcp", 80);
+  Serial.println("[mdns] ai-usage-display.local advertised");
+}
+
 void setup() {
   Serial.begin(115200);
   delay(2000);
   Serial.println("[boot] esp32-ai-usage-display v0");
   connectWifi();
+  startMdns();
 }
 
 void loop() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[wifi] dropped, reconnecting");
     connectWifi();
+    startMdns();
   }
   delay(5000);
 }
