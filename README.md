@@ -1,4 +1,4 @@
-# esp32-ai-usage-display
+# ESP32 AI Desktop Buddy
 
 A desk-mounted display that shows your **Claude Code** quota burn at a glance.
 
