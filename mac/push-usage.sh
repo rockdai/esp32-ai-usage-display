@@ -47,17 +47,32 @@ iso_to_epoch() {
 ccusage_blocks_json() {
   if [ -n "$CCUSAGE_FIXTURE_DIR" ]; then
     cat "$CCUSAGE_FIXTURE_DIR/blocks-active.json"
-  else
-    npx ccusage@latest blocks --active --json 2>/dev/null
+    return
   fi
+  local raw
+  raw="$(npx --quiet ccusage@latest blocks --active --json 2>/dev/null)"
+  # Validate JSON; otherwise (e.g. cold-start npx banner pollution under
+  # launchd) return an empty default so jq does not crash. The device will
+  # see zeros for the 5h block this cycle and recover on the next tick.
+  if [ -z "$raw" ] || ! printf '%s' "$raw" | jq -e . >/dev/null 2>&1; then
+    echo '{"blocks":[]}'
+    return
+  fi
+  printf '%s' "$raw"
 }
 
 ccusage_daily_json() {
   if [ -n "$CCUSAGE_FIXTURE_DIR" ]; then
     cat "$CCUSAGE_FIXTURE_DIR/daily.json"
-  else
-    npx ccusage@latest daily --json 2>/dev/null
+    return
   fi
+  local raw
+  raw="$(npx --quiet ccusage@latest daily --json 2>/dev/null)"
+  if [ -z "$raw" ] || ! printf '%s' "$raw" | jq -e . >/dev/null 2>&1; then
+    echo '{"daily":[]}'
+    return
+  fi
+  printf '%s' "$raw"
 }
 
 # Earliest type:"user" timestamp in the trailing 168 h, scanning .jsonl
