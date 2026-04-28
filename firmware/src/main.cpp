@@ -25,9 +25,9 @@ static void connectWifi() {
 }
 
 static void startMdns() {
-  if (!MDNS.begin("ai-usage-display")) { Serial.println("[mdns] FAILED"); return; }
+  if (!MDNS.begin("ai-desktop-buddy")) { Serial.println("[mdns] FAILED"); return; }
   MDNS.addService("http", "tcp", 80);
-  Serial.println("[mdns] ai-usage-display.local advertised");
+  Serial.println("[mdns] ai-desktop-buddy.local advertised");
 }
 
 static void handleData() {
@@ -50,7 +50,7 @@ static void handleData() {
 void setup() {
   Serial.begin(115200);
   delay(2000);
-  Serial.println("[boot] esp32-ai-usage-display v0");
+  Serial.println("[boot] esp32-ai-desktop-buddy v0");
   displayInit();
   renderInit();
   g_mutex = xSemaphoreCreateMutex();

@@ -44,7 +44,7 @@ plan limits) are the primary metrics; today's token usage is secondary.
 ┌──────────── ESP32-S3-RLCD-4.2 ──────┐
 │ Arduino + LovyanGFX (PlatformIO)    │
 │   ├─ Wi-Fi STA                      │
-│   ├─ mDNS  ai-usage-display.local   │
+│   ├─ mDNS  ai-desktop-buddy.local   │
 │   ├─ HTTP server  POST /data        │
 │   └─ render loop @ 1 Hz             │
 └─────────────────────────────────────┘
@@ -78,14 +78,14 @@ docs/superpowers/
 ```bash
 cd mac
 cp secrets.env.example secrets.env
-# edit secrets.env: HOST=ai-usage-display.local
+# edit secrets.env: HOST=ai-desktop-buddy.local
 
 # install launchd job (once flashed and on the network):
-cp com.rock.ai-usage-push.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.rock.ai-usage-push.plist
+cp com.rock.ai-desktop-buddy-push.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.rock.ai-desktop-buddy-push.plist
 ```
 
-Logs: `~/Library/Logs/ai-usage-push.log`.
+Logs: `~/Library/Logs/ai-desktop-buddy.log`.
 
 ### 2. Firmware
 
@@ -100,7 +100,7 @@ pio run -t upload      # build + flash
 pio device monitor     # watch serial output
 ```
 
-The device announces itself on the LAN as `ai-usage-display.local` once it's
+The device announces itself on the LAN as `ai-desktop-buddy.local` once it's
 on Wi-Fi. The Mac job will start delivering data on the next minute boundary.
 
 ## Status

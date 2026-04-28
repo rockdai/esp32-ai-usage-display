@@ -4,7 +4,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.rock.ai-usage-push</string>
+  <string>com.rock.ai-desktop-buddy-push</string>
   <key>ProgramArguments</key>
   <array>
     <string>/Users/rock/code/esp32-ai-usage-display/mac/push-usage.sh</string>
@@ -14,9 +14,9 @@
   <key>StartInterval</key>
   <integer>60</integer>
   <key>StandardOutPath</key>
-  <string>/Users/rock/Library/Logs/ai-usage-push.log</string>
+  <string>/Users/rock/Library/Logs/ai-desktop-buddy.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/rock/Library/Logs/ai-usage-push.log</string>
+  <string>/Users/rock/Library/Logs/ai-desktop-buddy.log</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
