@@ -7,6 +7,7 @@
 #include "secrets.h"
 #include "state.h"
 #include "api.h"
+#include "display.h"
 
 static WebServer server(80);
 static UsageData g_state;
@@ -49,6 +50,7 @@ void setup() {
   Serial.begin(115200);
   delay(2000);
   Serial.println("[boot] esp32-ai-usage-display v0");
+  displayInit();
   g_mutex = xSemaphoreCreateMutex();
   connectWifi();
   startMdns();
