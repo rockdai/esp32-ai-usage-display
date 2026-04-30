@@ -33,3 +33,19 @@ struct UsageData {
 
   bool     valid = false;
 };
+
+// ---- Attention (Claude Code activity) -----------------------------------
+
+enum AttentionKind : uint8_t {
+  ATTN_IDLE    = 0,   // no active session — render Screen A (usage)
+  ATTN_WORKING = 1,   // user submitted prompt; Claude processing
+  ATTN_DONE    = 2,   // Claude finished; user should look
+  ATTN_WAITING = 3,   // Claude needs input (permission prompt etc)
+};
+
+struct AttentionState {
+  AttentionKind kind     = ATTN_IDLE;
+  uint32_t      since_ms = 0;     // millis() at entry into current kind
+  char          cwd[64]  = {0};   // truncated to 63 chars + null
+  bool          valid    = false; // false until first event lands
+};
