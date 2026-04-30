@@ -69,3 +69,66 @@ STUB
   run bash -c "source $STAGE/hooks/_lib.sh; post_attention DONE"
   [ "$status" -eq 0 ]
 }
+
+@test "install-hooks creates hooks block when settings.json is empty" {
+  echo '{}' > "$STAGE/settings.json"
+  bash "$BATS_TEST_DIRNAME/../install-hooks.sh" --settings "$STAGE/settings.json"
+
+  v="$(jq -r '.hooks.Stop[0].command' "$STAGE/settings.json")"
+  echo "$v" | grep -q 'mac/hooks/stop.sh$'
+
+  v="$(jq -r '.hooks.UserPromptSubmit[0].command' "$STAGE/settings.json")"
+  echo "$v" | grep -q 'mac/hooks/user-prompt-submit.sh$'
+
+  v="$(jq -r '.hooks.Notification[0].command' "$STAGE/settings.json")"
+  echo "$v" | grep -q 'mac/hooks/notification.sh$'
+
+  v="$(jq -r '.hooks.SessionEnd[0].command' "$STAGE/settings.json")"
+  echo "$v" | grep -q 'mac/hooks/session-end.sh$'
+}
+
+@test "install-hooks preserves unrelated keys" {
+  cat > "$STAGE/settings.json" <<'JSON'
+{ "model": "opus", "theme": "dark" }
+JSON
+  bash "$BATS_TEST_DIRNAME/../install-hooks.sh" --settings "$STAGE/settings.json"
+
+  [ "$(jq -r .model "$STAGE/settings.json")" = "opus" ]
+  [ "$(jq -r .theme "$STAGE/settings.json")" = "dark" ]
+  [ "$(jq -r '.hooks.Stop[0].type' "$STAGE/settings.json")" = "command" ]
+}
+
+@test "install-hooks is idempotent (re-run produces same output)" {
+  echo '{}' > "$STAGE/settings.json"
+  bash "$BATS_TEST_DIRNAME/../install-hooks.sh" --settings "$STAGE/settings.json"
+  cp "$STAGE/settings.json" "$STAGE/after-1.json"
+  bash "$BATS_TEST_DIRNAME/../install-hooks.sh" --settings "$STAGE/settings.json"
+  diff "$STAGE/after-1.json" "$STAGE/settings.json"
+}
+
+@test "install-hooks merges with pre-existing user hooks (does not duplicate or clobber)" {
+  cat > "$STAGE/settings.json" <<'JSON'
+{ "hooks": { "Stop": [{ "type": "command", "command": "/usr/bin/true" }] } }
+JSON
+  bash "$BATS_TEST_DIRNAME/../install-hooks.sh" --settings "$STAGE/settings.json"
+
+  # Pre-existing entry must still be present
+  count="$(jq '.hooks.Stop | length' "$STAGE/settings.json")"
+  [ "$count" = "2" ]
+  [ "$(jq -r '.hooks.Stop[0].command' "$STAGE/settings.json")" = "/usr/bin/true" ]
+}
+
+@test "uninstall-hooks removes our entries, preserves user entries" {
+  bash "$BATS_TEST_DIRNAME/../install-hooks.sh" --settings "$STAGE/settings.json" 2>/dev/null || true
+  echo '{ "hooks": { "Stop": [{ "type": "command", "command": "/usr/bin/true" }] } }' > "$STAGE/settings.json"
+  bash "$BATS_TEST_DIRNAME/../install-hooks.sh"   --settings "$STAGE/settings.json"
+  bash "$BATS_TEST_DIRNAME/../uninstall-hooks.sh" --settings "$STAGE/settings.json"
+
+  # Only the user's pre-existing entry should remain
+  [ "$(jq '.hooks.Stop | length' "$STAGE/settings.json")" = "1" ]
+  [ "$(jq -r '.hooks.Stop[0].command' "$STAGE/settings.json")" = "/usr/bin/true" ]
+
+  # Our hooks for events with no other entries should be empty arrays or removed
+  none_left="$(jq -r '.hooks.Notification // [] | map(select(.command|contains("ai-desktop-buddy"))) | length' "$STAGE/settings.json")"
+  [ "$none_left" = "0" ]
+}
