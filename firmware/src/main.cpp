@@ -10,6 +10,7 @@
 #include "attention.h"
 #include "display.h"
 #include "render.h"
+#include "key.h"
 
 static WebServer server(80);
 static UsageData g_state;
@@ -72,6 +73,7 @@ void setup() {
   displayInit();
   renderInit();
   g_mutex = xSemaphoreCreateMutex();
+  keyInit();
   connectWifi();
   startMdns();
   server.on("/data", HTTP_POST, handleData);
@@ -86,6 +88,16 @@ void loop() {
     Serial.println("[wifi] dropped, reconnecting");
     connectWifi();
     startMdns();
+  }
+
+  if (keyPressedSinceLastCall()) {
+    xSemaphoreTake(g_mutex, portMAX_DELAY);
+    g_attention.kind = ATTN_IDLE;
+    g_attention.since_ms = millis();
+    g_attention.cwd[0] = '\0';
+    g_dirty = true;
+    xSemaphoreGive(g_mutex);
+    Serial.println("[key] dismissed → IDLE");
   }
 
   static uint32_t last_render = 0;
