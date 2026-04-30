@@ -1,7 +1,20 @@
 # KEY button pin verification (Waveshare ESP32-S3-RLCD-4.2)
 
 **Date**: 2026-04-30
-**Status**: confirmed from docs
+**Status**: deferred — physical KEY button NOT present on the user's board
+
+## TL;DR (post-e2e update)
+
+The user's actual board has only BOOT (no second user button), even though the
+Waveshare reference docs and demo source describe a third "KEY" button on
+GPIO 18. This is likely a board-revision difference. The KEY-dismiss feature
+is therefore **disabled** in v1.0; clearance happens via SessionEnd hook or
+the 15-min timeout. The research below stays in the repo for future use:
+if the user solders a tactile button to GPIO 18 (or a different pin), the
+software side can be re-enabled by reverting the deletion of `firmware/src/key.{h,cpp}`
+and the corresponding wires in `main.cpp` (see commit history).
+
+## Original research (kept for future reference)
 
 ## Method
 
