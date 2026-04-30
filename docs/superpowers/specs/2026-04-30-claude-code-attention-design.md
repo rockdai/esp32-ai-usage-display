@@ -499,3 +499,31 @@ A single hand-driven walk-through, recorded with photos:
 - Battery-aware behavior. Same deferral as the 2026-04-26 spec §12.
 - Statistical view: "DONE 23 times today" / "longest WAITING 12 minutes". Could
   live alongside the today line on Screen A. Out of scope for v1.x.
+
+## 14. v1.0 implementation status (post-e2e)
+
+Two deviations from this design were absorbed during the end-to-end walkthrough.
+Captured here so a reader of this spec alone is not misled. Full context lives
+in `docs/superpowers/notes/2026-04-30-attention-e2e-log.md`.
+
+1. **KEY-dismiss path removed.** The user's actual board variant lacks the third
+   physical button (only BOOT is present); the GPIO-18 KEY described in §5.2
+   and §8.2 was never reachable. `key.h`/`key.cpp` were deleted and the wires
+   in `main.cpp` removed. Clearance for v1.0 is via SessionEnd hook + 15-min
+   timeout only. §8.2's "KEY pressed" transition row is therefore aspirational;
+   §12 risk #4 is closed in the negative (no KEY at all, not just unconfirmed
+   GPIO).
+
+2. **Compact-usage footer simplified.** The §7.4 example string
+   `5H 1.0M ▓▓▓▓▓░░░ 4h30m  Wk 5.4M ▓░░ 6d 4h` overflowed 400 px when weekly
+   tokens reached 9-figure territory; the implementation drops the mini-bars
+   and uses integer-M token format. The current footer reads
+   `5H <int>M <reset>  Wk <int>M <reset>` (e.g. `5H 66M 4h 32m  Wk 497M 6d 1h`)
+   and uses `setTextWrap(false)` defensively so future overflow clips at the
+   right edge instead of wrapping below.
+
+3. **15-minute timeout** is unit-tested (`test_tick_past_timeout_goes_idle` +
+   `test_tick_handles_millis_rollover`) but was not live-verified end-to-end.
+   This is acceptable for v1.0 — the logic is pure arithmetic, the tests cover
+   the boundary and rollover paths, and the cost of a 16-minute live test in
+   real time was not worth blocking shipment.

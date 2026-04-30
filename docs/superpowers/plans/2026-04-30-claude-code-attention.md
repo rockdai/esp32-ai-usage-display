@@ -1505,3 +1505,26 @@ Before declaring done, verify against the spec:
 - [ ] §11 testing: bats tests for hooks (Task 1, 3); native tests for parser + tick (Task 5); hardware visual + e2e (Tasks 7, 9, 10).
 
 If a row above can't be ticked, file a follow-up task before claiming the feature complete.
+
+---
+
+## Post-execution amendments
+
+For the record, two task definitions in this plan diverged from the as-shipped
+state during end-to-end testing:
+
+- **Tasks 8–9 (KEY GPIO + driver) — removed during e2e.** The user's board
+  variant lacks the third physical button. `firmware/src/key.{h,cpp}` were
+  deleted; `main.cpp` integration was reverted. See e2e log §"Scope changes"
+  for the removal commit (`8d8c966`).
+- **Task 7 footer format string — replaced.** Plan §258 / §1037 showed
+  `5H <X>M ▓▓░░ <reset>` style with mini-bars and decimal tokens; actual
+  shipped form is `5H <int>M <reset>  Wk <int>M <reset>` with
+  `setTextWrap(false)`. Reason: the original format overflowed 400 px when
+  weekly tokens hit 9 figures and wrapped into a second line below y=295.
+  See e2e log §"Issues found and fixed during e2e" for the fix commit
+  (`1eaa1e8`).
+
+Both deviations are logged in
+`docs/superpowers/notes/2026-04-30-attention-e2e-log.md` and acknowledged in
+the spec's §14 (v1.0 implementation status).
