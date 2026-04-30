@@ -7,12 +7,20 @@ setup() {
   cp "$BATS_TEST_DIRNAME/../hooks/_lib.sh" "$STAGE/hooks/_lib.sh"
   echo "HOST=test.local" > "$STAGE/secrets.env"
 
-  # Stub curl: capture argv and stdin to files; exit 0.
+  # Stub curl: capture argv and the value of --data to files; exit 0.
   cat > "$STAGE/stub/curl" <<STUB
 #!/bin/sh
+# Capture argv (space-joined for substring grep) and the value of --data.
 printf '%s ' "\$@" > "$STAGE/curl-argv"
 echo >> "$STAGE/curl-argv"
-cat > "$STAGE/curl-body"
+prev=""
+for a in "\$@"; do
+  if [ "\$prev" = "--data" ]; then
+    printf '%s' "\$a" > "$STAGE/curl-body"
+    break
+  fi
+  prev="\$a"
+done
 exit 0
 STUB
   chmod +x "$STAGE/stub/curl"

@@ -33,10 +33,9 @@ post_attention() {
     --arg     sid "$sid" \
     '{ts:$ts, state:$state, cwd:$cwd, session_id:$sid}')"
 
-  printf '%s' "$payload" | \
   curl --max-time 2 -sf \
        -X POST -H 'Content-Type: application/json' \
-       --data @- \
+       --data "$payload" \
        "http://${HOST}/attention" \
        >/dev/null 2>&1 || true
 }
