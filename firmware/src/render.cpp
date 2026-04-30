@@ -289,6 +289,162 @@ static void drawWaiting() {
   d->print(msg);
 }
 
+// ---- Screen B (attention) ----------------------------------------------
+
+// Header for Screen B. Uses cwd basename in place of plan.
+static void drawScreenBHeader(const AttentionState& a, bool wifi_ok) {
+  d->fillRect(0, 0, 400, 44, BG);
+  d->setTextColor(INK);
+
+  // "CLAUDE" size 4 left, fake-bold via 1 px x-offset double-print.
+  d->setTextSize(4);
+  d->setCursor(8, 8);
+  d->print("CLAUDE");
+  int x_after = d->getCursorX();
+  d->setCursor(9, 8);
+  d->print("CLAUDE");
+
+  // cwd basename right-aligned size 2 (truncate to 16 chars with leading "...").
+  // basename of "" → "" (rendered nothing).
+  const char* p = a.cwd;
+  const char* basename_start = a.cwd;
+  while (*p) {
+    if (*p == '/') basename_start = p + 1;
+    ++p;
+  }
+  char shown[20];
+  size_t n = strlen(basename_start);
+  if (n > 16) {
+    shown[0] = '.'; shown[1] = '.'; shown[2] = '.';
+    memcpy(shown + 3, basename_start + (n - 13), 13);
+    shown[16] = '\0';
+  } else {
+    memcpy(shown, basename_start, n);
+    shown[n] = '\0';
+  }
+
+  d->setTextSize(2);
+  int pw = d->textWidth(shown);
+  int px = 392 - pw;
+  if (px < x_after + 12) px = x_after + 12;
+  d->setCursor(px, 22);
+  d->print(shown);
+
+  if (!wifi_ok) {
+    d->setTextSize(1);
+    d->setCursor(360, 2);
+    d->print("WiFi?");
+  }
+
+  d->drawFastHLine(0, 44, 400, INK);
+}
+
+// State-styled badge centered horizontally in y=80..180 strip.
+//
+//   WORKING  size 4, no box, no fill           — low visual weight
+//   DONE     size 6, 1 px outline, no fill     — mid
+//   WAITING  size 6, 2 px outline + filled,
+//            text drawn in BG (reverse video)  — high
+//
+// The DONE/WAITING box geometry is identical so they read as the same
+// thing with different urgency. WORKING fits inside the same y range
+// without a box.
+static void drawStateBadge(AttentionKind kind) {
+  // Common box geometry (matches DONE/WAITING text width budget).
+  const int box_x = 42, box_y = 80, box_w = 316, box_h = 100;
+  const char* text = nullptr;
+  int text_size = 0;
+  switch (kind) {
+    case ATTN_WORKING: text = "WORKING"; text_size = 4; break;
+    case ATTN_DONE:    text = "DONE";    text_size = 6; break;
+    case ATTN_WAITING: text = "WAITING"; text_size = 6; break;
+    default: return;
+  }
+
+  if (kind == ATTN_WAITING) {
+    d->fillRect(box_x,     box_y,     box_w,     box_h,     INK);
+    d->drawRect(box_x - 1, box_y - 1, box_w + 2, box_h + 2, INK);  // 2 px border
+    d->setTextColor(BG);
+  } else if (kind == ATTN_DONE) {
+    d->drawRect(box_x, box_y, box_w, box_h, INK);                  // 1 px border
+    d->setTextColor(INK);
+  } else {
+    d->setTextColor(INK);
+  }
+
+  d->setTextSize(text_size);
+  int tw = d->textWidth(text);
+  int tx = box_x + (box_w - tw) / 2;
+  // size N → glyph height ≈ 8*N; vertical-center inside box_h.
+  int th = 8 * text_size;
+  int ty = box_y + (box_h - th) / 2;
+  d->setCursor(tx, ty);
+  d->print(text);
+  d->setTextColor(INK);  // restore default
+}
+
+// "<verb> <Nm>" centered at y=200, size 2.
+static void drawDurationLine(AttentionKind kind, uint32_t elapsed_ms) {
+  const char* verb = "";
+  switch (kind) {
+    case ATTN_WORKING: verb = "working"; break;
+    case ATTN_DONE:    verb = "done";    break;
+    case ATTN_WAITING: verb = "asking";  break;
+    default: return;
+  }
+  uint32_t mins = elapsed_ms / 60000UL;
+  char line[32];
+  snprintf(line, sizeof(line), "%s %um", verb, (unsigned)mins);
+
+  d->setTextColor(INK);
+  d->setTextSize(2);
+  int w = d->textWidth(line);
+  int x = (400 - w) / 2;
+  if (x < 0) x = 0;
+  d->setCursor(x, 200);
+  d->print(line);
+}
+
+// Single-line compact usage at y=280, size 2:
+//   "5H 1.0M  4h30m   Wk 5.4M  6d 4h"
+// If usage is invalid, render placeholders so the strip's height is preserved.
+static void drawCompactUsageFooter(const UsageData& s) {
+  d->drawFastHLine(0, 270, 400, INK);
+
+  d->setTextColor(INK);
+  d->setTextSize(2);
+  d->setCursor(8, 280);
+
+  if (!s.valid) {
+    d->print("5H ----   Wk ----");
+    return;
+  }
+
+  uint32_t now = s.ts;
+  char tok5h[16], tokwk[16];
+  formatTokens(s.tok_5h,     tok5h, sizeof(tok5h));
+  formatTokens(s.tok_weekly, tokwk, sizeof(tokwk));
+  char dur5h[16], durwk[16];
+  if (s.reset_5h     > now) fmtDuration(s.reset_5h     - now, dur5h, sizeof(dur5h)); else dur5h[0] = '\0';
+  if (s.reset_weekly > now) fmtDuration(s.reset_weekly - now, durwk, sizeof(durwk)); else durwk[0] = '\0';
+
+  char line[64];
+  snprintf(line, sizeof(line), "5H %s  %s   Wk %s  %s",
+           tok5h, dur5h, tokwk, durwk);
+  d->print(line);
+}
+
+// ---- Screen B top-level ------------------------------------------------
+
+static void drawScreenB(const UsageData& u, const AttentionState& a,
+                        uint32_t now_ms, bool wifi_ok) {
+  drawScreenBHeader(a, wifi_ok);
+  drawStateBadge(a.kind);
+  uint32_t elapsed = now_ms - a.since_ms;
+  drawDurationLine(a.kind, elapsed);
+  drawCompactUsageFooter(u);
+}
+
 // ---- top-level tick -------------------------------------------------------
 
 // === DIAGNOSTIC MODE ===
@@ -316,46 +472,46 @@ static void drawDiagBlock(int y, const char* label) {
 }
 #endif
 
-void renderTick(const UsageData& s, bool stale, bool wifi_ok,
-                uint32_t ms_since_post) {
+void renderTick(const UsageData& s, const AttentionState& a,
+                bool stale, bool wifi_ok, uint32_t ms_since_post) {
   if (!d) return;
 
 #if RENDER_DIAG_BARS
+  // (unchanged diagnostic block)
   d->fillScreen(BG);
-  // Five blocks at varied Y positions, including the EXACT 5H and WEEKLY
-  // bar positions used in the full layout (81 and 183). If only the
-  // 183-block shows the artifact, the panel has a row-specific quirk
-  // there; if all clean, the artifact comes from the surrounding render
-  // (text overflow into bar area, layout interaction, etc).
-  drawDiagBlock( 20, "A");   // top
-  drawDiagBlock( 81, "B");   // exactly where 5H bar sits
-  drawDiagBlock(140, "C");   // mid (gap above weekly's normal Y)
-  drawDiagBlock(183, "D");   // exactly where WEEKLY bar sits
-  drawDiagBlock(245, "E");   // bottom
+  drawDiagBlock( 20, "A");
+  drawDiagBlock( 81, "B");
+  drawDiagBlock(140, "C");
+  drawDiagBlock(183, "D");
+  drawDiagBlock(245, "E");
   displayCommit();
   return;
 #endif
 
   d->fillScreen(BG);
-  drawHeader(s, wifi_ok);
 
+  if (a.kind != ATTN_IDLE) {
+    drawScreenB(s, a, millis(), wifi_ok);
+    displayCommit();
+    return;
+  }
+
+  // ---- Screen A (existing) ----
+  drawHeader(s, wifi_ok);
   if (!s.valid) {
     drawWaiting();
     displayCommit();
     return;
   }
 
-  uint32_t now = s.ts;  // we have no NTP; treat the payload's `ts` as "now"
-
+  uint32_t now = s.ts;
   char meta_l[80], meta_r[48];
   buildMeta5h(s, meta_l, sizeof(meta_l), meta_r, sizeof(meta_r), now);
   drawWindow(62, "5H BLOCK", s.tok_5h, s.started_5h, s.reset_5h, now,
              meta_l, meta_r);
-
   buildMetaWeekly(s, meta_l, sizeof(meta_l), meta_r, sizeof(meta_r), now);
   drawWindow(164, "WEEKLY", s.tok_weekly, s.started_weekly, s.reset_weekly,
              now, meta_l, meta_r);
-
   drawFooter(s, stale, ms_since_post);
   displayCommit();
 }

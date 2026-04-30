@@ -91,13 +91,20 @@ void loop() {
   static uint32_t last_render = 0;
   if (millis() - last_render >= 1000) {
     last_render = millis();
-    uint32_t age = millis() - g_last_post_ms;
     bool wifi_ok = WiFi.status() == WL_CONNECTED;
+    uint32_t age = millis() - g_last_post_ms;
     bool stale = age > 300000UL;
+
     xSemaphoreTake(g_mutex, portMAX_DELAY);
-    UsageData snap = g_state;
+    UsageData      snap_u = g_state;
+    AttentionState snap_a = g_attention;
+    if (attentionTick(g_attention, millis())) {
+      snap_a = g_attention;       // pick up the IDLE transition
+      g_dirty = true;
+    }
     xSemaphoreGive(g_mutex);
-    renderTick(snap, stale, wifi_ok, age);
+
+    renderTick(snap_u, snap_a, stale, wifi_ok, age);
   }
 
   delay(10);
