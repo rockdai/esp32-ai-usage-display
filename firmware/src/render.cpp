@@ -291,21 +291,25 @@ static void drawWaiting() {
 
 // ---- Screen B (attention) ----------------------------------------------
 
-// Header for Screen B. Uses cwd basename in place of plan.
+// Header for Screen B. The project basename is the dominant glyph (it
+// answers "which window do I switch to"). No "claude" branding tag —
+// the badge below already says it's about Claude. Wi-Fi indicator only
+// surfaces when the network is down.
 static void drawScreenBHeader(const AttentionState& a, bool wifi_ok) {
   d->fillRect(0, 0, 400, 44, BG);
   d->setTextColor(INK);
 
-  // "CLAUDE" size 4 left, fake-bold via 1 px x-offset double-print.
-  d->setTextSize(4);
-  d->setCursor(8, 8);
-  d->print("CLAUDE");
-  int x_after = d->getCursorX();
-  d->setCursor(9, 8);
-  d->print("CLAUDE");
+  if (!wifi_ok) {
+    d->setTextSize(1);
+    const char* tag = "WiFi?";
+    int tag_w = d->textWidth(tag);
+    d->setCursor(392 - tag_w, 4);
+    d->print(tag);
+  }
 
-  // cwd basename right-aligned size 2 (truncate to 16 chars with leading "...").
-  // basename of "" → "" (rendered nothing).
+  // Project basename (last path segment), size 3 (18 px wide × 24 px tall).
+  // Truncate basenames > 16 chars with "..." prefix + last 13 chars so the
+  // identifying suffix stays visible.
   const char* p = a.cwd;
   const char* basename_start = a.cwd;
   while (*p) {
@@ -323,18 +327,9 @@ static void drawScreenBHeader(const AttentionState& a, bool wifi_ok) {
     shown[n] = '\0';
   }
 
-  d->setTextSize(2);
-  int pw = d->textWidth(shown);
-  int px = 392 - pw;
-  if (px < x_after + 12) px = x_after + 12;
-  d->setCursor(px, 22);
+  d->setTextSize(3);
+  d->setCursor(8, 12);
   d->print(shown);
-
-  if (!wifi_ok) {
-    d->setTextSize(1);
-    d->setCursor(360, 2);
-    d->print("WiFi?");
-  }
 
   d->drawFastHLine(0, 44, 400, INK);
 }
@@ -405,33 +400,57 @@ static void drawDurationLine(AttentionKind kind, uint32_t elapsed_ms) {
   d->print(line);
 }
 
+// Like formatTokens but drops the decimal for >= 1M values. The footer
+// strip is tight (max ~32 chars at size 2 in 384 px); weekly tokens can
+// reach 9-figure territory (e.g. 491M), and the .X decimal pushed real
+// payloads past the right edge, wrapping into a second line that bled
+// over the panel bottom. Integer M is plenty informative for "shrunken"
+// usage data.
+static void formatTokensCompact(uint64_t v, char* out, size_t n) {
+  if (v >= 1000000ULL) {
+    snprintf(out, n, "%lluM", (unsigned long long)(v / 1000000ULL));
+  } else if (v >= 1000ULL) {
+    snprintf(out, n, "%lluK", (unsigned long long)(v / 1000ULL));
+  } else {
+    snprintf(out, n, "%llu", (unsigned long long)v);
+  }
+}
+
 // Single-line compact usage at y=280, size 2:
-//   "5H 1.0M  4h30m   Wk 5.4M  6d 4h"
+//   "5H 60M 4h 30m  Wk 491M 6d 4h"
+// Tokens are integer-M (formatTokensCompact). Worst-case ~30 chars × 12 px
+// = 360 px + 8 px margin = 368 px (under the 400 px panel width).
+// setTextWrap(false) is set as a defensive guard: if a future payload
+// somehow still overflows, the overflow clips at the right edge instead
+// of wrapping into a second line that would render below y=295.
 // If usage is invalid, render placeholders so the strip's height is preserved.
 static void drawCompactUsageFooter(const UsageData& s) {
   d->drawFastHLine(0, 270, 400, INK);
 
   d->setTextColor(INK);
   d->setTextSize(2);
+  d->setTextWrap(false);
   d->setCursor(8, 280);
 
   if (!s.valid) {
-    d->print("5H ----   Wk ----");
+    d->print("5H ----  Wk ----");
+    d->setTextWrap(true);
     return;
   }
 
   uint32_t now = s.ts;
   char tok5h[16], tokwk[16];
-  formatTokens(s.tok_5h,     tok5h, sizeof(tok5h));
-  formatTokens(s.tok_weekly, tokwk, sizeof(tokwk));
+  formatTokensCompact(s.tok_5h,     tok5h, sizeof(tok5h));
+  formatTokensCompact(s.tok_weekly, tokwk, sizeof(tokwk));
   char dur5h[16], durwk[16];
   if (s.reset_5h     > now) fmtDuration(s.reset_5h     - now, dur5h, sizeof(dur5h)); else dur5h[0] = '\0';
   if (s.reset_weekly > now) fmtDuration(s.reset_weekly - now, durwk, sizeof(durwk)); else durwk[0] = '\0';
 
   char line[64];
-  snprintf(line, sizeof(line), "5H %s  %s   Wk %s  %s",
+  snprintf(line, sizeof(line), "5H %s %s  Wk %s %s",
            tok5h, dur5h, tokwk, durwk);
   d->print(line);
+  d->setTextWrap(true);
 }
 
 // ---- Screen B top-level ------------------------------------------------
