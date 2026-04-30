@@ -7,11 +7,13 @@
 #include "secrets.h"
 #include "state.h"
 #include "api.h"
+#include "attention.h"
 #include "display.h"
 #include "render.h"
 
 static WebServer server(80);
 static UsageData g_state;
+static AttentionState g_attention;
 static SemaphoreHandle_t g_mutex;
 static volatile bool g_dirty = true;
 static volatile uint32_t g_last_post_ms = 0;
@@ -47,6 +49,22 @@ static void handleData() {
   server.send(200, "text/plain", "ok");
 }
 
+static void handleAttention() {
+  if (!server.hasArg("plain")) { server.send(400, "text/plain", "no body"); return; }
+  AttentionState parsed;
+  if (!parseAttentionJson(server.arg("plain").c_str(), parsed)) {
+    server.send(400, "text/plain", "bad json");
+    return;
+  }
+  parsed.since_ms = millis();
+  xSemaphoreTake(g_mutex, portMAX_DELAY);
+  g_attention = parsed;
+  g_dirty = true;
+  xSemaphoreGive(g_mutex);
+  Serial.printf("[api] attention kind=%d cwd=%s\n", (int)parsed.kind, parsed.cwd);
+  server.send(200, "text/plain", "ok");
+}
+
 void setup() {
   Serial.begin(115200);
   delay(2000);
@@ -57,6 +75,7 @@ void setup() {
   connectWifi();
   startMdns();
   server.on("/data", HTTP_POST, handleData);
+  server.on("/attention", HTTP_POST, handleAttention);
   server.begin();
   Serial.println("[http] server on :80");
 }
