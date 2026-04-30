@@ -10,7 +10,8 @@ setup() {
   # Stub curl: capture argv and stdin to files; exit 0.
   cat > "$STAGE/stub/curl" <<STUB
 #!/bin/sh
-printf '%s\n' "\$@" > "$STAGE/curl-argv"
+printf '%s ' "\$@" > "$STAGE/curl-argv"
+echo >> "$STAGE/curl-argv"
 cat > "$STAGE/curl-body"
 exit 0
 STUB
