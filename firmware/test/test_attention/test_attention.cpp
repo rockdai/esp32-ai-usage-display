@@ -17,6 +17,7 @@ void test_parse_valid_working() {
   TEST_ASSERT_EQUAL(ATTN_WORKING, a.kind);
   TEST_ASSERT_EQUAL_STRING("/Users/rock/code/foo", a.cwd);
   TEST_ASSERT_TRUE(a.valid);
+  TEST_ASSERT_EQUAL_UINT32(0, a.since_ms);  // parser must NOT stamp this; handler does
 }
 
 void test_parse_done_waiting_idle() {
@@ -79,8 +80,12 @@ void test_tick_past_timeout_goes_idle() {
   AttentionState s;
   s.kind = ATTN_DONE;
   s.since_ms = 1000;
-  TEST_ASSERT_TRUE(attentionTick(s, 1000 + 16UL*60*1000));
+  s.cwd[0] = 'x'; s.cwd[1] = '\0';   // seed a non-empty cwd
+  uint32_t now = 1000 + 16UL*60*1000;
+  TEST_ASSERT_TRUE(attentionTick(s, now));
   TEST_ASSERT_EQUAL(ATTN_IDLE, s.kind);
+  TEST_ASSERT_EQUAL_UINT32(now, s.since_ms);  // since_ms must be updated to now_ms
+  TEST_ASSERT_EQUAL_STRING("", s.cwd);         // cwd must be cleared
 }
 
 void test_tick_idle_never_transitions() {
