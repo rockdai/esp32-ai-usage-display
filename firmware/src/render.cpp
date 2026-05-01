@@ -307,27 +307,37 @@ static void drawScreenBHeader(const AttentionState& a, bool wifi_ok) {
     d->print(tag);
   }
 
-  // Project basename (last path segment), size 3 (18 px wide × 24 px tall).
-  // Truncate basenames > 16 chars with "..." prefix + last 13 chars so the
-  // identifying suffix stays visible.
+  // Project basename (last path segment), size 3.
+  // Fit-to-width: show the full basename if it fits in `max_w`; otherwise
+  // trim characters from the end and append "..." (prefix preserved, since
+  // most projects are more identifiable by their first chars than their
+  // suffix). The WiFi tag sits on a different y row so it doesn't constrain
+  // the horizontal budget here.
   const char* p = a.cwd;
   const char* basename_start = a.cwd;
   while (*p) {
     if (*p == '/') basename_start = p + 1;
     ++p;
   }
-  char shown[20];
-  size_t n = strlen(basename_start);
-  if (n > 16) {
-    shown[0] = '.'; shown[1] = '.'; shown[2] = '.';
-    memcpy(shown + 3, basename_start + (n - 13), 13);
-    shown[16] = '\0';
-  } else {
-    memcpy(shown, basename_start, n);
-    shown[n] = '\0';
-  }
 
   d->setTextSize(3);
+
+  const int max_w = 388;  // 400 - 8 (left margin) - 4 (right gutter)
+  char shown[64];
+  size_t n = strlen(basename_start);
+  if (n >= sizeof(shown)) n = sizeof(shown) - 1;
+  memcpy(shown, basename_start, n);
+  shown[n] = '\0';
+
+  if (d->textWidth(shown) > max_w) {
+    size_t keep = n;
+    while (keep > 0) {
+      --keep;
+      memcpy(shown + keep, "...", 4);  // includes null terminator
+      if (d->textWidth(shown) <= max_w) break;
+    }
+  }
+
   d->setCursor(8, 12);
   d->print(shown);
 
